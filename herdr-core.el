@@ -2765,12 +2765,18 @@ clear filters, `x' fold a group, `H'/`V' columns, `|' pin, ...) work too.
     (herdr-core--sync-table-state)
     (setq herdr-core--agents agents)
     (let ((props (herdr-core--agents-props agents)))
-      (if (and herdr-core--agents-root (eq herdr-core--agents-root vui--mounted-root))
+      (if (and herdr-core--agents-root (eq herdr-core--agents-root (herdr-core--vui-root)))
           (vui-update herdr-core--agents-root props)
         (setq herdr-core--agents-root
               (herdr-core--vui-mount (apply #'vui-component 'vuistack-table props) (buffer-name)))))
     (set-buffer-modified-p nil)
     (herdr-core--goto-address address column)))
+
+(defun herdr-core--vui-root ()
+  "The vui root instance mounted in this buffer, on any vui.
+Newer vui names it `vui--mounted-root', older `vui--root-instance'."
+  (cond ((boundp 'vui--mounted-root) (symbol-value 'vui--mounted-root))
+        ((boundp 'vui--root-instance) (symbol-value 'vui--root-instance))))
 
 (defun herdr-core--vui-mount (vnode name)
   "Mount VNODE in buffer NAME without showing it, on any vui.
