@@ -61,6 +61,7 @@ or =orion/t3= there.
 | Ghostel attach buffers, several side by side (columns/rows/grid/function) | =herdr-core-attach-several=, =herdr-core-attach-group= | =herdr-core-side-by-side-layouts=, =herdr-core-attach-history-hook-and-display-actions= |
 | Read buffers rendering links, files, images, diffs (pluggable renderers) | =herdr-core-read-agent= | =herdr-core-read-renders-links-files-images-and-diffs=, =herdr-core-read-remote-files-and-images-go-through-hc=, =herdr-core-read-follows-the-agent= |
 | Session names from labels (session.title, herdr.space, herdr.tab) | buffer names, =herdr-core-rename-agent= | =herdr-core-buffers-are-named-by-the-session-title= (the session-name golden table), =herdr-core-attach-buffers-follow-the-session-title= |
+| Control layout: the list on the left, the agent under its cursor on the right (attached, watched or read), switching as the cursor rests; TAB goes into it | =herdr-core-control=, =herdr-core-follow-mode=, =herdr-core-follow-focus= | =herdr-core-follow-shows-the-row-agent-in-the-follow-window=, =herdr-core-follow-schedule-debounces= |
 | Mode-line count and notifications | =herdr-core-mode= | =herdr-core-mode-line-notify-and-reconnect=, =herdr-core-notify-and-mode-line-options= |
 | Push events, poll fallback or poll only | =herdr-core-reconnect=, =herdr-core-poll= | =herdr-core-poll-policy-and-poll-fallback=, =herdr-core-event-hooks-and-machine-refresh= |
 | Send region, keys, interrupt, put a file, wait, rename, kill, schema | =herdr-core-send-region=, =herdr-core-submit-region=, =herdr-core-send-keys=, =herdr-core-interrupt-agent=, =herdr-core-put-file=, =herdr-core-wait-agent=, =herdr-core-rename-agent=, =herdr-core-kill-agent=, =herdr-core-schema= | =herdr-core-send-region-and-submit=, =herdr-core-talk-commands-go-through-hc= |
@@ -273,6 +274,16 @@ Every behavior is an option or hook, one customize group per area under
 | =herdr-core-mode-line-function= | ~herdr-core-mode-line-segment~ | Function of no arguments returning the mode-line segment string. |
 | =herdr-core-mode= | ~nil~ | Non-nil if Herdr-Core mode is enabled. See the =herdr-core-mode= command for a description of this minor mode. Setting this variable directly does not take effect; either customize it (see the info node =Easy Customization=) or call the function =herdr-core-mode=. |
 | =herdr-core-mode-hook= | ~nil~ | Hook run after entering or leaving =herdr-core-mode=. No problems result if this variable is not bound. =add-hook= automatically binds it. (This is true for all hook variables.) |
+
+** =herdr-core-control=: The list beside a window that follows its cursor.
+
+| Option | Default | What it does |
+|-
+| =herdr-core-control-list-width= | ~0.32~ | Width of the list in =herdr-core-control=: a fraction of the frame, or columns. |
+| =herdr-core-control-follow= | ~attach~ | What the follow window shows for the agent under the list cursor: =attach= types into it, =observe= watches it, =read= shows its screen and history. Attached buffers are kept, so going back is a swap. |
+| =herdr-core-control-debounce= | ~0.2~ | Seconds the list cursor must rest on a row before the follow window changes. |
+| =herdr-core-control-follow-functions= | ~nil~ | Called with the agent alist each time the follow window shows a new agent. |
+| =herdr-core-follow-mode-hook= | ~nil~ | Hook run after entering or leaving =herdr-core-follow-mode=. |
 
 ** =herdr-core-keys=: Keys and the transient menu.
 
