@@ -24,7 +24,7 @@ git clone https://github.com/davidawad/herdr-core.el ~/code/herdr-core.el
 #+end_src
 
 
-Needs Emacs 30.1+, =transient= (built in), [[https://github.com/d12frosted/vui.el][vui.el]] (MELPA), vuistack-table
+Needs Emacs 30.1+, =transient= (built in), [[https://github.com/d12frosted/vui.el][vui.el]] (MELPA), [[https://github.com/davidawad/vuistack-table][vuistack-table]]
 (a TanStack-style table component for vui; the agent list is one) and =hc= on
 =PATH= (or =herdr-core-executable=). Attach buffers use [[https://github.com/dakra/ghostel][Ghostel]] when it is installed,
 else =term=.
