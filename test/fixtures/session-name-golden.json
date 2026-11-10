@@ -1,0 +1,22 @@
+[
+  {"case": "space and tab from labels",
+   "expect": {"herdr_space": "juniper", "herdr_tab": "build-7 - Fix the cache",
+              "title": "juniper · build-7 - Fix the cache",
+              "emacs_buffer": "*hc: juniper · build-7 - Fix the cache*"}},
+  {"case": "no tab detail",
+   "expect": {"herdr_space": "juniper", "herdr_tab": "claude",
+              "title": "juniper · claude",
+              "emacs_buffer": "*hc: juniper · claude*"}},
+  {"case": "second space",
+   "expect": {"herdr_space": "tidepool", "herdr_tab": "tidepool-lead",
+              "title": "tidepool · tidepool-lead",
+              "emacs_buffer": "*hc: tidepool · tidepool-lead*"}},
+  {"case": "space with a space in it",
+   "expect": {"herdr_space": "Borealis Ltd", "herdr_tab": "claude",
+              "title": "Borealis Ltd · claude",
+              "emacs_buffer": "*hc: Borealis Ltd · claude*"}},
+  {"case": "long detail",
+   "expect": {"herdr_space": "quillwork", "herdr_tab": "named-run-x",
+              "title": "quillwork · named-run-x",
+              "emacs_buffer": "*hc: quillwork · named-run-x*"}}
+]

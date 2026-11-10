@@ -1,0 +1,7 @@
+{"jsonrpc":"2.0","method":"event","params":{"data":{"reported":true,"status":{"app":"codex","state":"blocked","kind":"question","msg":"Which branch?"},"status_ms":1794268990000},"seq":6,"terminal":"orion/t2","type":"status"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"labels":{"herdr.space":"juniper","herdr.tab":"job-a","session.title":"juniper · job-a - Renamed"}},"seq":7,"terminal":"t1","type":"labels"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"state":"done","turn":2},"seq":8,"terminal":"t1","type":"turn"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"address":"job-q-a1/t1","argv":["claude"],"created_ms":1794268995000,"cwd":"/work/repo","keep":true,"labels":{"herdr.space":"juniper","herdr.tab":"job-q","session.title":"juniper · job-q - Second pod"},"name":"agent","state":"live","status":null,"status_ms":null,"turn":0},"seq":9,"terminal":"job-q-a1/t1","type":"created"}}
+{"removed":"job-p-a1"}
+{"jsonrpc":"2.0","method":"event","params":{"data":{},"seq":10,"terminal":"job-p-a1/t1","type":"removed"}}
+{"jsonrpc":"2.0","method":"event","params":{"data":{"exit_code":0,"reason":"exited"},"seq":11,"terminal":"t3","type":"finished"}}
