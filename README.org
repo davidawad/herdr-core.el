@@ -24,8 +24,9 @@ git clone https://github.com/davidawad/herdr-core.el ~/code/herdr-core.el
 #+end_src
 
 
-Needs Emacs 29.1+, =transient= (built in) and =hc= on =PATH= (or
-=herdr-core-executable=). Attach buffers use [[https://github.com/dakra/ghostel][Ghostel]] when it is installed,
+Needs Emacs 30.1+, =transient= (built in), [[https://github.com/d12frosted/vui.el][vui.el]] (MELPA), vuistack-table
+(a TanStack-style table component for vui; the agent list is one) and =hc= on
+=PATH= (or =herdr-core-executable=). Attach buffers use [[https://github.com/dakra/ghostel][Ghostel]] when it is installed,
 else =term=.
 
 #+begin_src emacs-lisp
@@ -51,8 +52,9 @@ or =orion/t3= there.
 | Feature | Commands | Covered by (test/) |
 |-
 | Live agent list from =hc events=, every machine | =herdr-core-agents= | =herdr-core-agents-list-buffer-and-keys=, =herdr-core-live-pod-agent-in-the-list-and-picker= |
-| Customizable columns, sorting, grouping (machine/space/tab/kind/status/label/function) | =S=, =G= in the list | =herdr-core-list-columns-sorting-and-grouping= |
-| Narrowing, marks, several marked side by side | =/ m=, =/ s=, =/ t=, =/ /=, =m=, =u=, =v= | =herdr-core-list-narrow-mark-and-keys= |
+| The list is a vuistack-table: customizable columns, multi-sort (attention by default), grouping with attention counts (machine/space/tab/kind/status/label/function) | =S=, =C-u S=, =G=, =x= in the list | =herdr-core-list-columns-sorting-and-grouping=, =herdr-core-list-table-grouping-and-aggregation= |
+| Narrowing as column filters, global and fuzzy filters, marks as the table's selection, several marked side by side | =/ m=, =/ s=, =/ t=, =/ f=, =f=, =/ /=, =m=, =u=, =v= | =herdr-core-list-narrow-mark-and-keys=, =herdr-core-list-table-filters= |
+| Row actions and live updates that keep the table's sort, filters and selection | =RET=, mouse-1, =a=, =o=, =r= | =herdr-core-list-table-row-actions=, =herdr-core-list-table-keeps-state-across-events= |
 | Attention-sorted picker, completion groups, pluggable reader | =herdr-core-switch-agent=, =herdr-core-attach-agent=, =herdr-core-observe-agent= | =herdr-core-picker-groups-and-custom-reader=, =herdr-core-switch-attach-observe-read-goto-blocked= |
 | Next/previous/last, jump to blocked, next needing attention | =herdr-core-next-agent=, =herdr-core-previous-agent=, =herdr-core-last-agent=, =herdr-core-goto-blocked=, =herdr-core-next-attention= | =herdr-core-next-previous-attention-and-scope= |
 | Switch by machine, space, tab; attach any terminal | =herdr-core-switch-machine=, =herdr-core-switch-space=, =herdr-core-switch-tab=, =herdr-core-attach-terminal= | =herdr-core-switch-machine-space-tab-and-any-terminal= |
@@ -62,7 +64,7 @@ or =orion/t3= there.
 | Mode-line count and notifications | =herdr-core-mode= | =herdr-core-mode-line-notify-and-reconnect=, =herdr-core-notify-and-mode-line-options= |
 | Push events, poll fallback or poll only | =herdr-core-reconnect=, =herdr-core-poll= | =herdr-core-poll-policy-and-poll-fallback=, =herdr-core-event-hooks-and-machine-refresh= |
 | Send region, keys, interrupt, put a file, wait, rename, kill, schema | =herdr-core-send-region=, =herdr-core-submit-region=, =herdr-core-send-keys=, =herdr-core-interrupt-agent=, =herdr-core-put-file=, =herdr-core-wait-agent=, =herdr-core-rename-agent=, =herdr-core-kill-agent=, =herdr-core-schema= | =herdr-core-send-region-and-submit=, =herdr-core-talk-commands-go-through-hc= |
-| Start an agent through a customizable launcher (default =hc-agent run=) | =herdr-core-new-agent= (C-u: pick the machine) | =herdr-core-new-agent-goes-through-the-one-launcher=, =herdr-core-launcher-template-machine-and-hooks= |
+| Start an agent through a customizable launcher (default =hc run=, labelled) | =herdr-core-new-agent= (C-u: pick the machine) | =herdr-core-new-agent-goes-through-the-one-launcher=, =herdr-core-launcher-template-machine-and-hooks= |
 | hc's own picker in a buffer | =herdr-core=, =herdr-core-hide=, =herdr-core-toggle= | =herdr-core-picker-buffer-runs-hc= |
 | Keymap and transient menu | =herdr-core-command-map=, =herdr-core-menu= | =herdr-core-keymap-prefix-and-menu-suffixes=, =herdr-core-menu-builds-its-suffixes= |
 | Backend command, args, environment, starting the core | | =herdr-core-backend-args-and-environment=, =herdr-core-picker-offers-to-start-the-core= |
@@ -71,13 +73,32 @@ or =orion/t3= there.
 
 ** The agent list (=herdr-core-agents=)
 
-=RET=/mouse-1 show, =a= attach (C-u: afresh), =o= watch, =r= read, =s= send a
-line, =b= next blocked, =S= sort by a column (again: reverse; "attention"
-restores the default), =G= group, =/ m= =/ s= =/ t= narrow to a machine, space
-or tab and =/ /= widens, =m=/=u= mark and =v= show the marked side by side,
-=i= interrupt, =e= rename, =k= kill, =c= new agent, =?= the menu, =g= reconnect.
-The keymap is =herdr-core-agents-mode-map=; =herdr-core-agents-mode-hook= runs
-in the buffer.
+The list is a [[https://github.com/d12frosted/vui.el][vui]] buffer holding one vuistack-table:
+the columns of =herdr-core-list-columns= (each may carry vuistack-table column
+keys), sorted by default by attention then most recent change (a multi-sort:
+the headings show =Status ▲1=-style marks only for shown columns), grouped by
+=herdr-core-group-by= on a group column whose rows read
+=herdr-core-group-header-function=, the agent count and, in the status column,
+a glyph and count per attention status. Sort, filters, grouping, folded groups,
+the marks (the table's row selection) and the page are the table's state: an hc
+event re-renders the table and keeps them, and point stays on its agent.
+
+=RET=/mouse-1 show (the table's row action), =a= attach (C-u: afresh), =o=
+watch, =r= read, =s= send a line, =b= next blocked, =S= sort by a column (again:
+reverse; C-u adds it to the multi-sort; "attention" restores the default), =G=
+group, =/ m= =/ s= =/ t= narrow to a machine, space or tab (an exact column
+filter, shown after the headings), =/ f= filter every column (=~text= is fuzzy,
+=Column: text= one column) and =/ /= drops the narrowing and every filter,
+=m=/=u= mark and =v= show the marked side by side, =i= interrupt, =e= rename,
+=k= kill, =c= new agent, =?= the menu, =g= reconnect, =n=/=p= next and previous
+agent. The table's own keys work too: =f= filter the column at point (its
+values offered with counts), =F= clear filters, =x=/=X= fold a group / all,
+=M=/=U= select all / none, =H=/=V= hide / show columns (=V= also shows the
+hidden attention, changed, machine, space and tab columns), =<= =>= move, =|=
+pin, =+= =-= =\== width, =]= =[= =#= pages, =T=/=B= pin a row, =c= is new agent
+here, =C= =w= cell ranges and copy, =C-c C-r= reset, =C-c C-d= the table's state.
+The keymap is =herdr-core-agents-mode-map= (its parent holds
+=vuistack-table-mode-map=); =herdr-core-agents-mode-hook= runs in the buffer.
 
 ** Read buffers (=herdr-core-read-agent=)
 
@@ -98,15 +119,20 @@ button.
 =herdr-core-new-agent= runs =herdr-core-launcher= with =herdr-core-launcher-args=,
 a template (=%n= name, =%d= directory, =%k= harness, =%m= machine, =%s= space,
 =%t= tab; a function element returns arguments, as =herdr-core-launch-on-args=
-gives =--on MACHINE=). The default launcher, =hc-agent run --name N
---cwd D -- KIND= (which labels herdr.space/herdr.tab). For
-plain hc:
+gives =--on MACHINE=). The default is plain hc, =herdr-core-launcher= ="hc"= with
+=herdr-core-hc-run-launcher-args=:
 
 #+begin_src emacs-lisp
-(setopt herdr-core-launcher "hc"
-        herdr-core-launcher-args herdr-core-hc-run-launcher-args)
 ;; hc run --bg --keep --outlive-parent --no-parent --json --name N --cwd D [--on M]
 ;;   --label herdr.space=S --label herdr.tab=T --label session.title="S · T" -- KIND
+#+end_src
+
+The labels put the agent in the Herdr app's spaces and tabs. A launcher script of
+your own (one that adds roles or sandboxes, say) goes in its place:
+
+#+begin_src emacs-lisp
+(setopt herdr-core-launcher "my-agent-launcher"
+        herdr-core-launcher-args '("run" "--name" "%n" "--cwd" "%d" "--" "%k"))
 #+end_src
 
 Or replace the whole step with =herdr-core-launch-function=, a function of
@@ -171,11 +197,12 @@ Every behavior is an option or hook, one customize group per area under
 
 | Option | Default | What it does |
 |-
-| =herdr-core-list-columns= | ~(("Status" 9 herdr-core-column-status...~ | Columns of the agent list: (TITLE WIDTH FUNCTION). FUNCTION gets the agent alist and returns the cell's string. Built in, each =herdr-core-column-= and: status, glyph, name, kind, machine, space, tab, cwd, message, age, address. |
-| =herdr-core-sort-predicate= | ~herdr-core-sort-by-attention~ | Predicate of two agents ordering every list, picker and cycle. |
-| =herdr-core-group-by= | ~nil~ | What the agent list (and picker) groups by. nil: no groups; =machine=, =space=, =tab=, =kind=, =status=; (label KEY): that label; or a function of an agent returning its group name. |
+| =herdr-core-list-columns= | ~(("Status" 9 herdr-core-column-status...~ | Columns of the agent list table: (TITLE WIDTH FUNCTION [PROPS]). FUNCTION gets the agent alist and returns the cell's string. Built in, each =herdr-core-column-= and: status, glyph, name, kind, machine, space, tab, cwd, message, age, address. WIDTH is the column's least width; it grows to its widest cell, up to =vuistack-table-max-auto-width=. PROPS, a plist of vuistack-table column keys (:hidden t, :sort-fn, :aggregation, :action ...), goes into the column spec. |
+| =herdr-core-sort-predicate= | ~herdr-core-sort-by-attention~ | Predicate of two agents ordering every list, picker and cycle. In the list table, attention is the default multi-sort (attention, then most recent change) and most recent the change column, sorted descending; any other predicate orders the rows the table starts from. |
+| =herdr-core-group-by= | ~nil~ | What the agent list (and picker) groups by. nil: no groups; =machine=, =space=, =tab=, =kind=, =status=; (label KEY): that label; or a function of an agent returning its group name. In the list it is the table's grouping, on a group column of its own. |
 | =herdr-core-group-order= | ~first~ | Order of groups: =first= by their first agent (attention), =name= by name. |
-| =herdr-core-group-header-function= | ~herdr-core-group-header~ | Function of (GROUP AGENTS) returning a group's header line text. |
+| =herdr-core-group-header-function= | ~herdr-core-group-header~ | Function of (GROUP AGENTS) returning the text of a group's row. The table adds the count of agents after it, and the status columns count the agents needing attention. |
+| =herdr-core-list-page-size= | ~nil~ | Agents per page of the list table, or nil for one page. |
 
 ** =herdr-core-picker=: Picking and switching agents.
 
@@ -223,8 +250,8 @@ Every behavior is an option or hook, one customize group per area under
 
 | Option | Default | What it does |
 |-
-| =herdr-core-launcher= | ~"hc-agent"~ | The program =herdr-core-new-agent= runs (the one launcher: hc-agent run). Its arguments are =herdr-core-launcher-args=. |
-| =herdr-core-launcher-args= | ~("run" "--name" "%n" "--cwd" ...)~ | Arguments of =herdr-core-launcher=. In strings, %n is the agent's name, %d its directory, %k its kind (harness), %m its machine, %s its space (the project), %t its tab (the name) and %% a percent sign. A symbol is a function of the spec alist ((?n . NAME) ...) returning a string, a list of strings or nil; =herdr-core-launch-on-args= gives --on MACHINE off this host. See =herdr-core-hc-run-launcher-args= for plain hc. |
+| =herdr-core-launcher= | ~"hc"~ | The program =herdr-core-new-agent= runs: hc itself, or a launcher script of your own. Its arguments are =herdr-core-launcher-args=. |
+| =herdr-core-launcher-args= | =herdr-core-hc-run-launcher-args= | Arguments of =herdr-core-launcher=. In strings, %n is the agent's name, %d its directory, %k its kind (harness), %m its machine, %s its space (the project), %t its tab (the name) and %% a percent sign. A symbol is a function of the spec alist ((?n . NAME) ...) returning a string, a list of strings or nil; =herdr-core-launch-on-args= gives --on MACHINE off this host. The default, =herdr-core-hc-run-launcher-args=, is plain =hc run=. |
 | =herdr-core-launch-function= | ~herdr-core-launch-command~ | Function of (SPEC CALLBACK) that starts an agent. SPEC is an alist (name dir kind machine space tab); CALLBACK is called with the new terminal's address, or nil when it failed. |
 | =herdr-core-default-agent-kind= | ~"claude"~ | Default harness for =herdr-core-new-agent=. |
 | =herdr-core-agent-kinds= | ~("claude" "codex" "pi" "opencode" ...)~ | Harnesses =herdr-core-new-agent= offers. |
@@ -266,7 +293,7 @@ Every behavior is an option or hook, one customize group per area under
 | =herdr-core-status-working= | =default= | Working agents. |
 | =herdr-core-status-idle= | =shadow= | Idle agents. |
 | =herdr-core-status-unknown= | =shadow= | Terminals that report no status. |
-| =herdr-core-group-header= | =bold= | Group header lines in the agent list. |
+| =herdr-core-group-header= | =bold= | Group rows in the agent list. |
 | =herdr-core-mode-line= | =warning= | The mode-line segment. |
 | =herdr-core-header-current= | =inverse video= | The current agent in attach-buffer header lines. |
 | =herdr-core-link= | =link= | Links and files in read buffers. |
@@ -278,4 +305,8 @@ ERT, no CI (the repo convention): =make test= runs everything against a fake
 quasar and a pod, the change lines after it, =hc ls --json=, =hc machine
 ls --json=, the session-name golden table), and, when a real =hc= is on =PATH=
 (or =HC_BIN=), against scratch cores with short socket paths under =/tmp=.
-=make compile= byte-compiles with warnings as errors.
+=make compile= byte-compiles with warnings as errors. Both first run =make
+deps=, which clones vui.el and vuistack-table into =.deps/= (git-ignored, not
+vendored); set =VUI= or =VUISTACK_TABLE= to directories of your own checkouts
+instead, or =VUI_URL=, =VUISTACK_URL= and =VUISTACK_PATH= to fetch them from
+elsewhere.

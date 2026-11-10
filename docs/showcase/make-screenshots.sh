@@ -1,11 +1,16 @@
 #!/bin/sh
 # Reproduce docs/showcase/agents.png: a scratch hc core (short socket dir under
 # /tmp, its own HOME) with fake agents on fake labels, shown by herdr-core-agents
-# in a terminal Emacs, captured with vhs.  Needs hc, emacs, vhs (and its ttyd and
-# ffmpeg).  Usage: docs/showcase/make-screenshots.sh [OUTPUT.png]
+# in a terminal Emacs (the vuistack-table list, grouped by space), captured with
+# vhs.  Needs hc, emacs, vhs (and its ttyd and ffmpeg) and the deps `make deps'
+# fetches (or VUI / VUISTACK_TABLE pointing at checkouts).
+# Usage: docs/showcase/make-screenshots.sh [OUTPUT.png]
 set -eu
 here=$(cd "$(dirname "$0")/../.." && pwd)
 out=${1:-$here/docs/showcase/agents.png}
+vui=${VUI:-$here/.deps/vui.el}
+vuistack=${VUISTACK_TABLE:-$here/.deps/vuistack/config/terminal/emacs/packages/vuistack-table}
+[ -f "$vui/vui.el" ] && [ -f "$vuistack/vuistack-table.el" ] || make -C "$here" deps
 root=$(mktemp -d /tmp/hcshow.XXXXXX)
 mkdir -p "$root/run" "$root/cwd"; chmod 700 "$root/run"
 env_sh="$root/env.sh"
@@ -32,15 +37,16 @@ sleep 2
 cat > "$root/emacs.sh" <<EOF
 #!/bin/sh
 . $env_sh
-exec emacs -nw -Q -L $here -l herdr-core.el --eval '(progn (herdr-core-agents) (delete-other-windows))'
+exec emacs -nw -Q -L $here -L $vui -L $vuistack -l herdr-core.el \\
+  --eval '(progn (setq herdr-core-group-by (quote space)) (herdr-core-agents) (delete-other-windows))'
 EOF
 chmod +x "$root/emacs.sh"
 cat > "$root/show.tape" <<EOF
 Output "$root/show.gif"
 Set Shell "bash"
 Set FontSize 18
-Set Width 1500
-Set Height 420
+Set Width 1700
+Set Height 480
 Set Padding 12
 Type "$root/emacs.sh"
 Enter
