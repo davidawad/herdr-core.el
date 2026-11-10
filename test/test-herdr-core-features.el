@@ -15,15 +15,36 @@
 (require 'test-herdr-core)
 
 (defun test-herdr-core--ids ()
-  "The agent ids of the list buffer's lines, top to bottom (nil for headers)."
+  "The agent addresses of the list buffer's lines, top to bottom."
   (with-current-buffer herdr-core--agents-buffer-name
     (save-excursion
       (goto-char (point-min))
       (let (ids)
         (while (not (eobp))
-          (push (tabulated-list-get-id) ids)
+          (when-let* ((id (herdr-core--list-address))) (push id ids))
           (forward-line 1))
         (nreverse ids)))))
+
+(defun test-herdr-core--group-rows ()
+  "The group rows of the list buffer, top to bottom, trimmed."
+  (with-current-buffer herdr-core--agents-buffer-name
+    (save-excursion
+      (goto-char (point-min))
+      (let (rows)
+        (while (not (eobp))
+          (let ((row (get-text-property (point) 'vuistack-table-row)))
+            (when (and row (not (plist-get row :address)))
+              (push (string-trim (replace-regexp-in-string
+                                  "\\`\\[.\\] +" "" (test-herdr-core--line)))
+                    rows)))
+          (forward-line 1))
+        (nreverse rows)))))
+
+(defun test-herdr-core--headers ()
+  "The headers of the list table's shown columns."
+  (with-current-buffer herdr-core--agents-buffer-name
+    (mapcar (lambda (c) (plist-get c :header))
+            (plist-get (vuistack-table--table herdr-core--table-id) :display))))
 
 (defun test-herdr-core--line ()
   "The current line's text."
@@ -131,11 +152,10 @@
                                        ("Address" 0 herdr-core-column-address))))
         (herdr-core-agents)
         (with-current-buffer herdr-core--agents-buffer-name
-          (goto-char (point-min))
-          (should (equal (tabulated-list-get-id) "quasar/t4"))
+          (should (equal (test-herdr-core--first-agent) "quasar/t4"))
           (should (string-match-p "● +job-b +~?/home/user/juniper +Run rm -rf build\\? +[0-9]+[smhd] +quasar/t4"
                                   (test-herdr-core--line)))
-          (should (equal (mapcar #'car tabulated-list-format) '("" "Tab" "Dir" "Msg" "Age" "Address")))))
+          (should (equal (test-herdr-core--headers) '("" "Tab" "Dir" "Msg" "Age" "Address")))))
       ;; Sort predicates.
       (let ((herdr-core-sort-predicate #'herdr-core-sort-by-name))
         (should (equal (test-herdr-core--addresses) '("t1" "quasar/t4" "job-p-a1/t1" "t3" "orion/t2"))))
@@ -145,44 +165,48 @@
         (should (equal (car (test-herdr-core--addresses)) "job-p-a1/t1")))
       (let ((herdr-core-sort-predicate #'herdr-core-sort-by-recent))
         (should (equal (car (test-herdr-core--addresses)) "t1")))
-      ;; Grouped by machine: a header per machine with its kind and counts.
+      ;; Grouped by machine: a table group row per machine, its kind, count
+      ;; and attention.
       (let ((herdr-core-group-by 'machine))
         (herdr-core-agents)
         (with-current-buffer herdr-core--agents-buffer-name
-          (should (equal (test-herdr-core--ids)
-                         '(nil "quasar/t4" nil "job-p-a1/t1" nil "t1" "t3" nil "orion/t2")))
+          (should (equal (test-herdr-core--ids) '("quasar/t4" "job-p-a1/t1" "t1" "t3" "orion/t2")))
+          (should (equal (mapcar (lambda (r) (replace-regexp-in-string "  +" " " r))
+                                 (test-herdr-core--group-rows))
+                         '("▾ quasar · ssh (1) ● 1" "▾ job-p-a1 · pod (1) ✓ 1"
+                           "▾ local · local (2)" "▾ orion · ssh (1)")))
+          (should (equal (car (test-herdr-core--headers)) "Machine"))
           (goto-char (point-min))
-          (should (equal (test-herdr-core--line) "quasar (ssh) · 1 agent, 1 blocked"))
-          (should (eq (get-text-property (point) 'face) 'herdr-core-group-header))
-          (forward-line 2)
-          (should (equal (test-herdr-core--line) "job-p-a1 (pod) · 1 agent"))
-          (forward-line 2)
-          (should (equal (test-herdr-core--line) "local (local) · 2 agents"))
-          ;; n and p skip headers.
+          (search-forward "quasar · ssh")
+          (should (memq 'herdr-core-group-header
+                        (ensure-list (get-text-property (match-beginning 0) 'face))))
+          ;; n and p skip headers and group rows.
           (goto-char (point-min))
           (herdr-core-agents-next-line)
-          (should (equal (tabulated-list-get-id) "quasar/t4"))
+          (should (equal (herdr-core--list-address) "quasar/t4"))
           (herdr-core-agents-next-line)
-          (should (equal (tabulated-list-get-id) "job-p-a1/t1"))
+          (should (equal (herdr-core--list-address) "job-p-a1/t1"))
           (herdr-core-agents-next-line)
-          (should (equal (tabulated-list-get-id) "t1"))
+          (should (equal (herdr-core--list-address) "t1"))
           (herdr-core-agents-previous-line)
-          (should (equal (tabulated-list-get-id) "job-p-a1/t1"))
+          (should (equal (herdr-core--list-address) "job-p-a1/t1"))
           ;; Point stays on its agent across redraws.
           (herdr-core--refresh)
-          (should (equal (tabulated-list-get-id) "job-p-a1/t1"))
-          ;; A column sort applies within each group.
-          (herdr-core-agents-next-line)
-          (setq tabulated-list-sort-key '("Session" . t))
-          (herdr-core--agents-redraw)
-          (should (equal (seq-filter #'identity (test-herdr-core--ids))
-                         '("quasar/t4" "job-p-a1/t1" "t3" "t1" "orion/t2")))
-          (setq tabulated-list-sort-key nil)
+          (should (equal (herdr-core--list-address) "job-p-a1/t1"))
+          ;; A column sort applies within each group: Session, then reversed.
+          (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Session")))
+            (herdr-core-agents-sort)
+            (herdr-core-agents-sort))
+          (should (equal (test-herdr-core--ids) '("quasar/t4" "job-p-a1/t1" "t3" "t1" "orion/t2")))
+          (should (equal (herdr-core--table-get :sort) '((1 . t))))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) herdr-core--attention-sort-label)))
+            (herdr-core-agents-sort))
           ;; G regroups this buffer only.
           (herdr-core-agents-group 'space)
-          (goto-char (point-min))
-          (should (equal (test-herdr-core--line) "juniper · 3 agents, 1 blocked"))
+          (should (string-match-p "\\`▾ juniper (3) +● 1 +✓ 1\\'" (car (test-herdr-core--group-rows))))
           (herdr-core-agents-group nil)
+          (should-not (test-herdr-core--group-rows))
           (should (equal (car (test-herdr-core--ids)) "quasar/t4"))))
       (let ((herdr-core-group-by '(label "herdr.space")) (herdr-core-group-order 'name))
         (should (equal (mapcar #'car (herdr-core-groups (herdr-core-list)))
@@ -191,8 +215,8 @@
             (herdr-core-group-header-function (lambda (g agents) (format "== %s %d" g (length agents)))))
         (herdr-core--refresh)
         (with-current-buffer herdr-core--agents-buffer-name
-          (goto-char (point-min))
-          (should (equal (test-herdr-core--line) "== agents 3")))))))
+          (should (string-prefix-p "▾ == agents 3 (3)" (car (test-herdr-core--group-rows))))
+          (should (equal (car (test-herdr-core--headers)) "Group")))))))
 
 (ert-deftest herdr-core-list-narrow-mark-and-keys ()
   "`/' narrows to a machine, space or tab; marks show agents side by side."
@@ -209,31 +233,205 @@
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "tidepool-pm")))
         (herdr-core-agents-narrow-tab))
       (should (equal (test-herdr-core--ids) '("orion/t2")))
+      (should (string-match-p "\\[filter: tab: ==tidepool-pm\\]" (buffer-string)))
       (herdr-core-agents-widen)
       (should (= (length (test-herdr-core--ids)) 5))
       (should (eq (keymap-lookup herdr-core-agents-mode-map "/ m") #'herdr-core-agents-narrow-machine))
-      (dolist (k '("RET" "a" "o" "r" "s" "b" "S" "G" "m" "u" "v" "i" "e" "k" "c" "?" "n" "p"))
+      (dolist (k '("RET" "a" "o" "r" "s" "b" "S" "G" "m" "u" "v" "i" "e" "k" "c" "?" "n" "p" "g"))
         (should (commandp (keymap-lookup herdr-core-agents-mode-map k))))
-      (goto-char (point-min))
+      (test-herdr-core--first-agent)
       (herdr-core-agents-mark)
       (herdr-core-agents-mark)
-      (should (equal herdr-core--marked '("quasar/t4" "job-p-a1/t1")))
-      (should (string-prefix-p ">" (save-excursion (goto-char (point-min)) (test-herdr-core--line))))
+      (should (equal (herdr-core-agents-marked) '("quasar/t4" "job-p-a1/t1")))
+      (should (string-prefix-p "[x]" (save-excursion (test-herdr-core--first-agent) (test-herdr-core--line))))
       (herdr-core--refresh)
-      (should (string-prefix-p ">" (save-excursion (goto-char (point-min)) (test-herdr-core--line))))
+      (should (string-prefix-p "[x]" (save-excursion (test-herdr-core--first-agent) (test-herdr-core--line))))
       (herdr-core-agents-unmark)
-      (should (equal herdr-core--marked '("quasar/t4" "job-p-a1/t1")))
+      (should (equal (herdr-core-agents-marked) '("quasar/t4" "job-p-a1/t1")))
       (forward-line -2)
       (herdr-core-agents-unmark)
-      (should (equal herdr-core--marked '("quasar/t4")))
-      (goto-char (point-min))
+      (should (equal (herdr-core-agents-marked) '("quasar/t4")))
+      (test-herdr-core--first-agent)
       (forward-line 2)
       (herdr-core-agents-mark)
-      (herdr-core-agents-show-marked))
+      (herdr-core-agents-show-marked)
+      (should-not (herdr-core-agents-marked)))
     (should (= (length (window-list)) 2))
     (should (equal (mapcar (lambda (w) (buffer-local-value 'herdr-core--attached-address (window-buffer w)))
                            (window-list nil nil (frame-first-window)))
                    '("quasar/t4" "t1")))))
+
+;;;; The list as a vuistack-table: grouping, filters, actions, live state
+
+(defun test-herdr-core--goto-group (text)
+  "Move to the list's group row whose text contains TEXT."
+  (goto-char (point-min))
+  (let (found)
+    (while (and (not found) (not (eobp)))
+      (let ((row (get-text-property (point) 'vuistack-table-row)))
+        (if (and row (not (plist-get row :address))
+                 (string-match-p (regexp-quote text) (test-herdr-core--line)))
+            (setq found t)
+          (forward-line 1))))
+    (should found)))
+
+(defun test-herdr-core--goto-column (header)
+  "Move to the first agent's cell in the shown column HEADER."
+  (test-herdr-core--first-agent)
+  (let* ((table (vuistack-table--table herdr-core--table-id))
+         (index (plist-get (seq-find (lambda (c) (equal (plist-get c :header) header))
+                                     (plist-get table :display))
+                           :vuistack-table--index)))
+    (goto-char (text-property-any (line-beginning-position) (line-end-position)
+                                  'vuistack-table-column-index index))
+    (forward-char 1)))
+
+(ert-deftest herdr-core-list-table-grouping-and-aggregation ()
+  "Grouping is the table's: groups fold, nest under a column's own G, aggregate and page."
+  (test-herdr-core--with-fake dir
+    (test-herdr-core--with-machines
+      (test-herdr-core--load-snapshot)
+      (let ((herdr-core-group-by 'space))
+        (herdr-core-agents)
+        (with-current-buffer herdr-core--agents-buffer-name
+          (should (equal (herdr-core--table-get :grouping) (list (herdr-core--group-index))))
+          (should (eq (herdr-core--table-get :expanded) t))
+          (should (equal (mapcar (lambda (r) (car (split-string r "  "))) (test-herdr-core--group-rows))
+                         '("▾ juniper (3)" "▾ tidepool (1)" "▾ (no space) (1)")))
+          ;; x folds the group at point, X unfolds them all.
+          (test-herdr-core--goto-group "juniper")
+          (vuistack-table-toggle-expand)
+          (should (equal (test-herdr-core--ids) '("orion/t2" "t3")))
+          (should (string-prefix-p "▸ juniper (3)" (car (test-herdr-core--group-rows))))
+          (vuistack-table-toggle-expand-all)
+          (should (= (length (test-herdr-core--ids)) 5))
+          ;; The table's own G on a shown column nests a group under the space.
+          (test-herdr-core--goto-column "Kind")
+          (vuistack-table-group-by-column)
+          (should (equal (herdr-core--table-get :grouping)
+                         (list (herdr-core--group-index) 2)))
+          (should (seq-some (lambda (r) (string-match-p "\\`▾ +claude (3)" r))
+                            (test-herdr-core--group-rows)))
+          (should (string-match-p "grouped by Space > Kind" (buffer-string)))
+          ;; Dropping the herdr grouping keeps the table's own.
+          (herdr-core-agents-group nil)
+          (should (equal (herdr-core--table-get :grouping) nil))
+          (herdr-core-agents-group 'machine)
+          (should (equal (car (test-herdr-core--headers)) "Machine")))))
+    ;; Paging.
+    (kill-buffer herdr-core--agents-buffer-name)
+    (let ((herdr-core-list-page-size 2))
+      (herdr-core-agents)
+      (with-current-buffer herdr-core--agents-buffer-name
+        (should (equal (test-herdr-core--ids) '("quasar/t4" "job-p-a1/t1")))
+        (should (string-match-p "Page 1 of 3 · 5 rows" (buffer-string)))
+        (test-herdr-core--first-agent)
+        (vuistack-table-next-page)
+        (should (equal (test-herdr-core--ids) '("t1" "orion/t2")))))))
+
+(ert-deftest herdr-core-list-table-filters ()
+  "Global, fuzzy, per-column and faceted filters are the table's; narrowing stacks with them."
+  (test-herdr-core--with-fake dir
+    (test-herdr-core--load-snapshot)
+    (herdr-core-agents)
+    (with-current-buffer herdr-core--agents-buffer-name
+      (should (eq (keymap-lookup herdr-core-agents-mode-map "/ f") #'vuistack-table-filter))
+      (test-herdr-core--first-agent)
+      (vuistack-table-filter "juniper")
+      (should (equal (test-herdr-core--ids) '("quasar/t4" "job-p-a1/t1" "t1")))
+      (should (string-match-p "\\[filter: juniper\\]" (buffer-string)))
+      (test-herdr-core--first-agent)
+      (vuistack-table-filter "Kind: codex")
+      (should (equal (test-herdr-core--ids) '("orion/t2")))
+      (test-herdr-core--first-agent)
+      (vuistack-table-filter "~tdpm")
+      (should (equal (car (test-herdr-core--ids)) "orion/t2"))
+      (test-herdr-core--first-agent)
+      (vuistack-table-filter "")
+      (should (= (length (test-herdr-core--ids)) 5))
+      ;; f on a column completes its values with counts (faceting).
+      (test-herdr-core--goto-column "Machine")
+      (let (offered)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_p collection &rest _) (setq offered (all-completions "" collection))
+                     "local")))
+          (call-interactively #'vuistack-table-filter-column))
+        (should (equal (sort offered #'string<) '("job-p-a1" "local" "orion" "quasar"))))
+      (should (equal (test-herdr-core--ids) '("t1" "t3")))
+      ;; A narrowing stacks with it; / / drops both.
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "juniper")))
+        (herdr-core-agents-narrow-space))
+      (should (equal (test-herdr-core--ids) '("t1")))
+      (herdr-core-agents-widen)
+      (should (= (length (test-herdr-core--ids)) 5))
+      (should-not (herdr-core--table-get :column-filters)))))
+
+(ert-deftest herdr-core-list-table-row-actions ()
+  "RET runs the table's row action (show the agent); the table's keys are the list's."
+  (test-herdr-core--with-fake dir
+    (test-herdr-core--load-snapshot)
+    (herdr-core-agents)
+    (with-current-buffer herdr-core--agents-buffer-name
+      (test-herdr-core--goto-column "Session")
+      (should (functionp (get-text-property (point) 'vuistack-table-action)))
+      (should (eq (plist-get (plist-get (vuistack-table--table herdr-core--table-id) :options) :action)
+                  #'herdr-core--row-action))
+      (dolist (k '(("x" . vuistack-table-toggle-expand) ("f" . vuistack-table-filter-column)
+                   ("F" . vuistack-table-filter-reset) ("M" . vuistack-table-toggle-select-all)
+                   ("V" . vuistack-table-toggle-column) ("|" . vuistack-table-pin-column)))
+        (should (eq (keymap-lookup herdr-core-agents-mode-map (car k)) (cdr k))))
+      (herdr-core-agents-show))
+    (should (equal (nth 2 (car test-herdr-core--opened)) '("attach" "quasar/t4")))
+    (with-current-buffer herdr-core--agents-buffer-name
+      ;; Off a cell (the selection gutter), RET still shows the line's agent.
+      (test-herdr-core--first-agent)
+      (herdr-core-agents-next-line)
+      (beginning-of-line)
+      (should-not (get-text-property (point) 'vuistack-table-action))
+      (herdr-core-agents-show))
+    (should (equal (nth 2 (car test-herdr-core--opened)) '("attach" "job-p-a1/t1")))
+    (with-current-buffer herdr-core--agents-buffer-name
+      ;; The status line and headings are no agent.
+      (goto-char (point-min))
+      (should-error (herdr-core-agents-attach) :type 'user-error))))
+
+(ert-deftest herdr-core-list-table-keeps-state-across-events ()
+  "An hc event re-renders the mounted table keeping sort, filter, folds, selection and point."
+  (test-herdr-core--with-fake dir
+    (test-herdr-core--load-snapshot)
+    (herdr-core-agents)
+    (with-current-buffer herdr-core--agents-buffer-name
+      (let ((root herdr-core--agents-root))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Address")))
+          (herdr-core-agents-sort))
+        (test-herdr-core--first-agent)
+        (search-forward "quasar/t4")
+        (herdr-core-agents-mark)
+        (herdr-core-agents-group 'space)
+        (test-herdr-core--goto-group "juniper")
+        (vuistack-table-toggle-expand)
+        (should (equal (test-herdr-core--ids) '("orion/t2" "t3")))
+        (test-herdr-core--first-agent)
+        (should (equal (herdr-core--list-address) "orion/t2"))
+        ;; orion/t2 blocks, t1 is renamed, a pod joins, another leaves, t3 ends.
+        (apply #'test-herdr-core--feed (test-herdr-core--lines "changes.jsonl"))
+        (herdr-core--refresh)
+        (should (eq herdr-core--agents-root root))
+        (should (equal (herdr-core--list-address) "orion/t2"))
+        (should (equal (test-herdr-core--ids) '("orion/t2")))
+        (should (seq-some (lambda (r) (string-prefix-p "▸ juniper (3)" r)) (test-herdr-core--group-rows)))
+        (vuistack-table-toggle-expand-all)
+        (should (equal (test-herdr-core--ids) '("orion/t2" "job-q-a1/t1" "quasar/t4" "t1")))
+        (should (equal (herdr-core--table-get :sort) '((5))))
+        (should (equal (herdr-core-agents-marked) '("quasar/t4")))
+        (should (string-match-p "\\[x\\] .*juniper · job-b" (buffer-string)))
+        ;; A filter survives a fresh snapshot too.
+        (test-herdr-core--first-agent)
+        (vuistack-table-filter "tidepool")
+        (test-herdr-core--load-snapshot)
+        (herdr-core--refresh)
+        (should (equal (test-herdr-core--ids) '("orion/t2")))
+        (should (string-match-p "\\[filter: tidepool\\]" (buffer-string)))))))
 
 ;;;; Picking and switching
 
@@ -687,8 +885,9 @@ function, naming, directory and after-launch hooks are pluggable."
                                         (regexp-quote root))
                                 (test-herdr-core--log dir "launch.log")))
         (should (equal (caar launched) "t7")))
-      ;; The default hc-agent template cannot place a machine.
-      (should-error (herdr-core-new-agent "claude" "orion") :type 'user-error)
+      ;; A launcher template without --on cannot place a machine.
+      (let ((herdr-core-launcher-args '("run" "--name" "%n" "--cwd" "%d" "--" "%k")))
+        (should-error (herdr-core-new-agent "claude" "orion") :type 'user-error))
       ;; A Lisp launcher, its own names, no attach.
       (let* (spec-seen
              (herdr-core-launch-function (lambda (spec cb) (setq spec-seen spec) (funcall cb "orion/t9" "")))

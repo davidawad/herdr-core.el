@@ -62,7 +62,8 @@
          (herdr-core-group-by nil)
          (herdr-core-sort-predicate #'herdr-core-sort-by-attention)
          (herdr-core-labelled-only nil)
-         (herdr-core-status-change-functions nil))
+         (herdr-core-status-change-functions nil)
+         (vui-render-delay nil))
      (unwind-protect (progn ,@body)
        (when herdr-core--refresh-timer (cancel-timer herdr-core--refresh-timer))
        (herdr-core-stop))))
@@ -125,8 +126,8 @@ the snapshot; read: a screen; server start: clears DIR/down."
     file))
 
 (defun test-herdr-core--fake-launcher (dir)
-  "A fake bin/hc-agent in DIR: logs its args to launch.log, prints hc's line."
-  (let ((file (expand-file-name "hc-agent" dir)))
+  "A fake launcher in DIR: logs its args to launch.log, prints hc's line."
+  (let ((file (expand-file-name "launcher" dir)))
     (with-temp-file file
       (insert "#!/bin/sh\n"
               (format "printf '%%s\\n' \"$*\" >> %s\n"
@@ -375,7 +376,7 @@ layer's golden table says; an unlabelled one keeps its address; a clash gets <N>
         (should-error (herdr-core-send-region (point-min) (point-max)) :type 'user-error)))))
 
 (ert-deftest herdr-core-new-agent-goes-through-the-one-launcher ()
-  "herdr-core-new-agent runs hc-agent run --name --cwd -- KIND and attaches to its address."
+  "herdr-core-new-agent runs the launcher (by default hc run, labelled) and attaches to its address."
   (test-herdr-core--with-fake dir
     (let* ((root (file-name-as-directory (expand-file-name "proj" dir)))
            (default-directory root))
@@ -385,7 +386,10 @@ layer's golden table says; an unlabelled one keeps its address; a clash gets <N>
         (herdr-core-new-agent "claude"))
       (should (test-herdr-core--wait (lambda () (assoc "*hc: t7*" test-herdr-core--opened))))
       (should (equal (test-herdr-core--log dir "launch.log")
-                     (format "run --name proj-claude --cwd %s -- claude\n" root)))
+                     (concat "run --bg --keep --outlive-parent --no-parent --json"
+                             (format " --name proj-claude --cwd %s" root)
+                             " --label herdr.space=proj --label herdr.tab=proj-claude"
+                             " --label session.title=proj · proj-claude -- claude\n")))
       (should (equal (nth 2 (assoc "*hc: t7*" test-herdr-core--opened)) '("attach" "t7")))))
   (should (equal (herdr-core--sanitize-name "1My Proj!-claude") "my-proj-claude"))
   (should (equal (herdr-core--unique-agent-name "job-a" '(((name . "job-a")) ((name . "job-a-2"))))
@@ -406,28 +410,34 @@ layer's golden table says; an unlabelled one keeps its address; a clash gets <N>
     (herdr-core-toggle)
     (should-not (eq (window-buffer (selected-window)) (get-buffer herdr-core--buffer-name)))))
 
+(defun test-herdr-core--first-agent ()
+  "Move to the list's first agent line; return its address."
+  (goto-char (point-min))
+  (herdr-core--skip-header 1)
+  (herdr-core--list-address))
+
 (ert-deftest herdr-core-agents-list-buffer-and-keys ()
-  "herdr-core-agents follows the fake hc's stream; its keys call hc."
+  "herdr-core-agents follows the fake hc's stream in a vuistack table; its keys call hc."
   (test-herdr-core--with-fake dir
     (herdr-core-agents)
     (should (test-herdr-core--wait
              (lambda () (with-current-buffer herdr-core--agents-buffer-name
-                          (goto-char (point-min))
-                          (tabulated-list-get-id)))))
+                          (test-herdr-core--first-agent)))))
     (with-current-buffer herdr-core--agents-buffer-name
-      (goto-char (point-min))
-      (should (equal (tabulated-list-get-id) "quasar/t4"))
+      (should (derived-mode-p 'vui-mode))
+      (should (equal (test-herdr-core--first-agent) "quasar/t4"))
+      (should (eq (get-text-property (point) 'vuistack-table-id) herdr-core--table-id))
       (should (string-match-p "blocked:permission +juniper · job-b - Fix the fleet +claude +quasar +juniper +quasar/t4"
                               (buffer-substring (point) (line-end-position))))
       (let ((text (buffer-string)))
         (dolist (want '("local" "orion" "quasar" "job-p-a1"))
           (should (string-match-p (concat " " want " ") text))))
       (forward-line 2)
-      (should (equal (tabulated-list-get-id) "t1"))
+      (should (equal (herdr-core--list-address) "t1"))
       (herdr-core-agents-next-blocked)
-      (should (equal (tabulated-list-get-id) "quasar/t4"))
+      (should (equal (herdr-core--list-address) "quasar/t4"))
       (forward-line 3)
-      (should (equal (tabulated-list-get-id) "orion/t2"))
+      (should (equal (herdr-core--list-address) "orion/t2"))
       (herdr-core-agents-observe)
       (set-buffer herdr-core--agents-buffer-name)
       (herdr-core-agents-send "hello there")
@@ -437,12 +447,10 @@ layer's golden table says; an unlabelled one keeps its address; a clash gets <N>
       (set-buffer herdr-core--agents-buffer-name)
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Address")))
         (herdr-core-agents-sort))
-      (goto-char (point-min))
-      (should (equal (tabulated-list-get-id) "job-p-a1/t1"))
+      (should (equal (test-herdr-core--first-agent) "job-p-a1/t1"))
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) herdr-core--attention-sort-label)))
         (herdr-core-agents-sort))
-      (goto-char (point-min))
-      (should (equal (tabulated-list-get-id) "quasar/t4")))
+      (should (equal (test-herdr-core--first-agent) "quasar/t4")))
     (should (equal (mapcar (lambda (o) (nth 2 o)) (reverse test-herdr-core--opened))
                    '(("attach" "--observe" "orion/t2") ("attach" "orion/t2"))))
     (should (test-herdr-core--wait (lambda () (string-match-p "^send orion/t2 hello there$" (test-herdr-core--log dir)))))
@@ -451,8 +459,7 @@ layer's golden table says; an unlabelled one keeps its address; a clash gets <N>
     (apply #'test-herdr-core--feed (test-herdr-core--lines "changes.jsonl"))
     (herdr-core--refresh)
     (with-current-buffer herdr-core--agents-buffer-name
-      (goto-char (point-min))
-      (should (equal (tabulated-list-get-id) "orion/t2"))
+      (should (equal (test-herdr-core--first-agent) "orion/t2"))
       (should (string-match-p "job-q-a1" (buffer-string)))
       (should-not (string-match-p "job-p-a1" (buffer-string))))
     (kill-buffer herdr-core--agents-buffer-name)

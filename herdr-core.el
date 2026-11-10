@@ -3,8 +3,8 @@
 ;; Copyright (C) 2026 Ngoc Nguyen, David Awad
 
 ;; Author: Ngoc Nguyen, David Awad <me@davidaw.ad>
-;; Version: 0.3.0
-;; Package-Requires: ((emacs "29.1") (transient "0.4"))
+;; Version: 0.4.0
+;; Package-Requires: ((emacs "30.1") (transient "0.4") (vui "1.4") (vuistack-table "0.2"))
 ;; Keywords: terminals, tools
 ;; URL: https://gitlab.com/davidawad/herdr-core.el
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -35,7 +35,7 @@
 ;; GPL-3.0-or-later), ported to talk to hc instead of the herdr TUI.
 ;;
 ;; Seeing agents
-;;   `herdr-core-agents'          live list, grouped and sorted as you like
+;;   `herdr-core-agents'          live list (a vuistack-table), grouped and sorted as you like
 ;;   `herdr-core-mode'            event stream, mode-line count, notifications
 ;;   `herdr-core-menu'            transient menu of everything below
 ;; Switching
@@ -52,7 +52,7 @@
 ;;   `herdr-core-interrupt-agent', `herdr-core-put-file', `herdr-core-wait-agent',
 ;;   `herdr-core-rename-agent', `herdr-core-kill-agent'
 ;; Starting
-;;   `herdr-core-new-agent'       through `herdr-core-launcher' (hc-agent run)
+;;   `herdr-core-new-agent'       through `herdr-core-launcher' (hc run)
 ;;
 ;; State comes pushed from `hc events --json' (a snapshot line, then one
 ;; line per change; `missed' is a fresh snapshot); `herdr-core-refresh-policy'
@@ -70,9 +70,10 @@
 (require 'project)
 (require 'seq)
 (require 'subr-x)
-(require 'tabulated-list)
 (require 'transient)
 (require 'vc-git)
+(require 'vui)
+(require 'vuistack-table)
 
 (declare-function ghostel-exec "ghostel" (buffer program &optional args identity))
 (declare-function ghostel-mode "ghostel" ())
@@ -306,15 +307,23 @@ pod, command (a --via machine) or ssh."
     ("Machine" 16 herdr-core-column-machine)
     ("Space" 14 herdr-core-column-space)
     ("Address" 0 herdr-core-column-address))
-  "Columns of the agent list: (TITLE WIDTH FUNCTION).
+  "Columns of the agent list table: (TITLE WIDTH FUNCTION [PROPS]).
 FUNCTION gets the agent alist and returns the cell's string.  Built in,
 each `herdr-core-column-' and: status, glyph, name, kind, machine,
-space, tab, cwd, message, age, address."
-  :type '(repeat (list (string :tag "Title") (natnum :tag "Width") (function :tag "Cell")))
+space, tab, cwd, message, age, address.  WIDTH is the column's least
+width; it grows to its widest cell, up to `vuistack-table-max-auto-width'.
+PROPS, a plist of `vuistack-table' column keys (:hidden t,
+:sort-fn, :aggregation, :action ...), goes into the column spec."
+  :type '(repeat (choice (list (string :tag "Title") (natnum :tag "Width") (function :tag "Cell"))
+                         (list (string :tag "Title") (natnum :tag "Width") (function :tag "Cell")
+                               (plist :tag "vuistack-table column keys"))))
   :group 'herdr-core-list)
 
 (defcustom herdr-core-sort-predicate #'herdr-core-sort-by-attention
-  "Predicate of two agents ordering every list, picker and cycle."
+  "Predicate of two agents ordering every list, picker and cycle.
+In the list table, attention is the default multi-sort (attention, then
+most recent change) and most recent the change column, sorted descending;
+any other predicate orders the rows the table starts from."
   :type '(choice (const :tag "Attention, then most recent" herdr-core-sort-by-attention)
                  (const :tag "Most recent change" herdr-core-sort-by-recent)
                  (const :tag "Name" herdr-core-sort-by-name)
@@ -326,7 +335,8 @@ space, tab, cwd, message, age, address."
 (defcustom herdr-core-group-by nil
   "What the agent list (and picker) groups by.
 nil: no groups; `machine', `space', `tab', `kind', `status'; (label KEY):
-that label; or a function of an agent returning its group name."
+that label; or a function of an agent returning its group name.  In the
+list it is the table's grouping, on a group column of its own."
   :type '(choice (const :tag "No groups" nil)
                  (const machine) (const space) (const tab) (const kind) (const status)
                  (list :tag "Label" (const label) string)
@@ -339,8 +349,15 @@ that label; or a function of an agent returning its group name."
   :group 'herdr-core-list)
 
 (defcustom herdr-core-group-header-function #'herdr-core-group-header
-  "Function of (GROUP AGENTS) returning a group's header line text."
+  "Function of (GROUP AGENTS) returning the text of a group's row.
+The table adds the count of agents after it, and the status columns
+count the agents needing attention."
   :type 'function
+  :group 'herdr-core-list)
+
+(defcustom herdr-core-list-page-size nil
+  "Agents per page of the list table, or nil for one page."
+  :type '(choice (const :tag "One page" nil) natnum)
   :group 'herdr-core-list)
 
 ;;; Picker
@@ -516,12 +533,6 @@ On this host only existing files are linked; elsewhere only absolute paths."
 
 ;;; Launcher
 
-(defcustom herdr-core-launcher (or (executable-find "hc-agent") "hc-agent")
-  "The program `herdr-core-new-agent' runs (a launcher such as `hc-agent run').
-Its arguments are `herdr-core-launcher-args'."
-  :type 'string
-  :group 'herdr-core-launcher)
-
 (defconst herdr-core-hc-run-launcher-args
   '("run" "--bg" "--keep" "--outlive-parent" "--no-parent" "--json"
     "--name" "%n" "--cwd" "%d" herdr-core-launch-on-args
@@ -529,14 +540,22 @@ Its arguments are `herdr-core-launcher-args'."
     "--" "%k")
   "`herdr-core-launcher-args' for plain hc (`herdr-core-launcher' \"hc\").")
 
-(defcustom herdr-core-launcher-args '("run" "--name" "%n" "--cwd" "%d" "--" "%k")
+(defcustom herdr-core-launcher "hc"
+  "The program `herdr-core-new-agent' runs: hc itself (`hc run ...'), or a
+launcher script of your own.  Its arguments are `herdr-core-launcher-args'."
+  :type 'string
+  :group 'herdr-core-launcher)
+
+(defcustom herdr-core-launcher-args herdr-core-hc-run-launcher-args
   "Arguments of `herdr-core-launcher'.
 In strings, %n is the agent's name, %d its directory, %k its kind
 (harness), %m its machine, %s its space (the project), %t its tab
 (the name) and %% a percent sign.  A symbol is a function of the spec
 alist ((?n . NAME) ...) returning a string, a list of strings or nil;
-`herdr-core-launch-on-args' gives --on MACHINE off this host.  See
-`herdr-core-hc-run-launcher-args' for plain hc."
+`herdr-core-launch-on-args' gives --on MACHINE off this host.  The
+default, `herdr-core-hc-run-launcher-args', is plain `hc run'; a
+launcher script taking `run --name N --cwd D -- KIND' would use
+\='(\"run\" \"--name\" \"%n\" \"--cwd\" \"%d\" \"--\" \"%k\")."
   :type '(repeat (choice string function))
   :group 'herdr-core-launcher)
 
@@ -755,9 +774,6 @@ DESCRIPTION is a string or a function returning one."
 (defvar-local herdr-core--agents nil
   "Agents currently shown in the list buffer, sorted.")
 
-(defvar-local herdr-core--list-narrow nil
-  "(KEY . VALUE) the list buffer is narrowed to, or nil.")
-
 (defvar-local herdr-core--attached-address nil
   "The hc address this buffer shows, or nil.")
 (put 'herdr-core--attached-address 'permanent-local t)
@@ -911,13 +927,11 @@ DESCRIPTION is a string or a function returning one."
     (concat (format "%d agent%s" n (if (= n 1) "" "s"))
             (if (> b 0) (format ", %d blocked" b) ""))))
 
-(defun herdr-core-group-header (group agents)
-  "Default group header: GROUP (its machine kind under machine grouping) and counts of AGENTS."
-  (format "%s%s · %s" group
-          (if (eq herdr-core-group-by 'machine)
-              (format " (%s)" (herdr-core--machine-kind-of group))
-            "")
-          (herdr-core--count-phrase agents)))
+(defun herdr-core-group-header (group _agents)
+  "Default group row text: GROUP, and its machine kind under machine grouping."
+  (if (eq herdr-core-group-by 'machine)
+      (format "%s · %s" group (herdr-core--machine-kind-of group))
+    (format "%s" group)))
 
 ;;; The event stream
 
@@ -1642,7 +1656,7 @@ side by side.  With a prefix argument, choose BY first."
 (defun herdr-core--current-address ()
   "The agent address of the current buffer (attach, read or list row), or nil."
   (or herdr-core--attached-address
-      (and (derived-mode-p 'herdr-core-agents-mode) (tabulated-list-get-id))))
+      (and (derived-mode-p 'herdr-core-agents-mode) (herdr-core--list-address))))
 
 ;;;###autoload
 (defun herdr-core-last-agent ()
@@ -2356,8 +2370,8 @@ arg FORCE it types even into a blocked agent (answering its dialog)."
 (defun herdr-core-new-agent (kind &optional machine)
   "Start a KIND agent (a harness) for the current project and attach to it.
 Goes through `herdr-core-launch-function' (by default `herdr-core-launcher':
-hc-agent run), which names it and labels it
-herdr.space/herdr.tab.  With a prefix argument, pick the MACHINE."
+hc run), which names it and labels it herdr.space/herdr.tab.  With a
+prefix argument, pick the MACHINE."
   (interactive
    (list (completing-read "Agent kind: " herdr-core-agent-kinds nil nil
                           nil nil herdr-core-default-agent-kind)
@@ -2492,14 +2506,157 @@ looking at the agent's buffer, unless `herdr-core-notify-when-visible'."
               ((< s 86400) (format "%dh" (/ s 3600)))
               (t (format "%dd" (/ s 86400))))))))
 
+;; The list is a `vuistack-table' (a vui.el component) mounted in the
+;; buffer.  Its columns are `herdr-core-list-columns', then hidden
+;; helper columns the default sort and the narrowing read (attention,
+;; changed, machine, space, tab), then, while grouped, the group column.
+;; Sort, filters, grouping, expansion, selection (the marks) and paging
+;; are the table's state, buffer-local, so a re-render on an hc event
+;; keeps them.
+
+(defconst herdr-core--table-id 'herdr-core-agents
+  "The `vuistack-table' id of the agent list.")
+
+(defconst herdr-core--helper-columns '(attention changed machine space tab)
+  "Hidden columns after `herdr-core-list-columns', in order.")
+
+(defun herdr-core--status-of-cell (cell)
+  "The status a status or glyph CELL string shows."
+  (let ((text (substring-no-properties (format "%s" cell))))
+    (or (car (rassoc text herdr-core-status-glyphs))
+        (car (split-string text ":")))))
+
+(defun herdr-core--compare-status-cells (a b)
+  "Order status or glyph cells A and B by `herdr-core-status-priority'."
+  (let ((pa (herdr-core--priority `((status . ,(herdr-core--status-of-cell a)))))
+        (pb (herdr-core--priority `((status . ,(herdr-core--status-of-cell b))))))
+    (- pa pb)))
+
+(defun herdr-core--age-seconds (cell)
+  "Seconds an age CELL (5s, 3m, 2h, 4d) stands for, or nil."
+  (let ((text (format "%s" cell)))
+    (when (string-match "\\`\\([0-9]+\\)\\([smhd]\\)\\'" text)
+      (* (string-to-number (match-string 1 text))
+         (pcase (match-string 2 text) ("s" 1) ("m" 60) ("h" 3600) (_ 86400))))))
+
+(defun herdr-core--compare-ages (a b)
+  "Order age cells A and B, youngest first, blanks last."
+  (let ((sa (herdr-core--age-seconds a)) (sb (herdr-core--age-seconds b)))
+    (cond ((and sa sb) (- sa sb)) (sa -1) (sb 1) (t 0))))
+
+(defun herdr-core--aggregate-attention (_values rows)
+  "A group's attention cell: a glyph and count per attention status in ROWS."
+  (let ((statuses (mapcar (lambda (r) (alist-get 'status (plist-get r :agent))) rows)))
+    (string-join
+     (delq nil (mapcar (lambda (status)
+                         (let ((n (seq-count (lambda (s) (equal s status)) statuses)))
+                           (and (> n 0)
+                                (propertize (format "%s %d" (herdr-core--glyph status) n)
+                                            'face (herdr-core--status-face status)))))
+                       herdr-core-attention-statuses))
+     " ")))
+
+(defconst herdr-core--column-props
+  '((herdr-core-column-status :sort-fn herdr-core--compare-status-cells
+                              :aggregation herdr-core--aggregate-attention)
+    (herdr-core-column-glyph :sort-fn herdr-core--compare-status-cells
+                             :aggregation herdr-core--aggregate-attention)
+    (herdr-core-column-age :sort-fn herdr-core--compare-ages :align right))
+  "`vuistack-table' column keys the built-in cell functions add.")
+
+(defun herdr-core--list-column (spec)
+  "The `vuistack-table' column of a `herdr-core-list-columns' SPEC."
+  (pcase-let ((`(,title ,width ,fn . ,rest) spec))
+    (append (car rest)
+            (list :header title
+                  :get (lambda (row) (or (funcall fn (plist-get row :agent)) "")))
+            (and (> width 0) (list :min-width width))
+            (cdr (assq fn herdr-core--column-props)))))
+
+(defun herdr-core--helper-index (helper)
+  "The column index of HELPER, one of `herdr-core--helper-columns'."
+  (+ (length herdr-core-list-columns) (seq-position herdr-core--helper-columns helper)))
+
+(defun herdr-core--group-index ()
+  "The column index of the group column."
+  (+ (length herdr-core-list-columns) (length herdr-core--helper-columns)))
+
+(defun herdr-core--group-column (headers)
+  "The group column: a group row shows its header from HEADERS (GROUP -> text)."
+  (list :header (if (symbolp herdr-core-group-by)
+                    (capitalize (symbol-name herdr-core-group-by))
+                  "Group")
+        :id :herdr-group
+        :get #'ignore
+        :grouping-value (lambda (row) (plist-get row :group))
+        :format (lambda (group)
+                  (if-let* ((text (and group (gethash group headers))))
+                      (propertize text 'face 'herdr-core-group-header)
+                    ""))
+        :disable-sort t :disable-hide t))
+
+(defun herdr-core--table-columns (headers)
+  "Every column of the list table; HEADERS as in `herdr-core--group-column'."
+  (append (mapcar #'herdr-core--list-column herdr-core-list-columns)
+          (list (list :header "attention" :key :attention :hidden t)
+                (list :header "changed" :key :changed :hidden t :sort-desc-first t)
+                (list :header "machine" :key :machine :hidden t)
+                (list :header "space" :key :space :hidden t)
+                (list :header "tab" :key :tab :hidden t))
+          (and herdr-core-group-by (list (herdr-core--group-column headers)))))
+
+(defun herdr-core--default-sort ()
+  "The table sort standing for `herdr-core-sort-predicate'.
+Attention is the multi-sort attention, then most recent change; most
+recent is the change column; any other predicate already ordered the
+rows, so no sort keeps its order."
+  (let ((attention (herdr-core--helper-index 'attention))
+        (changed (herdr-core--helper-index 'changed)))
+    (pcase herdr-core-sort-predicate
+      ('herdr-core-sort-by-attention (list (cons attention nil) (cons changed t)))
+      ('herdr-core-sort-by-recent (list (cons changed t))))))
+
+(defun herdr-core--agent-rows (agents)
+  "AGENTS as table rows, in groups when grouped; and the group headers.
+Returns (ROWS . HEADERS), HEADERS a hash table GROUP -> header text."
+  (let ((headers (make-hash-table :test 'equal))
+        (rows nil))
+    (dolist (group (if herdr-core-group-by (herdr-core-groups agents) (list (cons nil agents))))
+      (when herdr-core-group-by
+        (puthash (car group) (funcall herdr-core-group-header-function (car group) (cdr group))
+                 headers))
+      (dolist (a (cdr group))
+        (push (list :address (alist-get 'address a) :agent a :group (car group)
+                    :attention (herdr-core--priority a) :changed (alist-get 'seq a)
+                    :machine (alist-get 'machine a) :space (alist-get 'space a)
+                    :tab (alist-get 'tab a))
+              rows)))
+    (cons (nreverse rows) headers)))
+
+(defun herdr-core--row-agent (row)
+  "The agent of table ROW, as known now."
+  (or (herdr-core--find-agent (plist-get row :address)) (plist-get row :agent)))
+
+(defun herdr-core--row-action (row)
+  "The table's row action: show ROW's agent here."
+  (herdr-core--attach-agent (herdr-core--row-agent row) nil))
+
+(defun herdr-core--list-address (&optional pos)
+  "The agent address of the list line at POS (default point), or nil."
+  (plist-get (get-text-property (save-excursion (goto-char (or pos (point)))
+                                                (line-beginning-position))
+                                'vuistack-table-row)
+             :address))
+
 (defvar-keymap herdr-core-agents-narrow-map
   "m" #'herdr-core-agents-narrow-machine
   "s" #'herdr-core-agents-narrow-space
   "t" #'herdr-core-agents-narrow-tab
+  "f" #'vuistack-table-filter
   "/" #'herdr-core-agents-widen)
 
 (defvar-keymap herdr-core-agents-mode-map
-  :parent tabulated-list-mode-map
+  :parent (make-composed-keymap vuistack-table-mode-map vui-mode-map)
   "RET" #'herdr-core-agents-show
   "<mouse-1>" #'herdr-core-agents-mouse-show
   "a" #'herdr-core-agents-attach
@@ -2517,112 +2674,127 @@ looking at the agent's buffer, unless `herdr-core-notify-when-visible'."
   "k" #'herdr-core-agents-kill
   "/" herdr-core-agents-narrow-map
   "c" #'herdr-core-new-agent
+  "g" #'herdr-core-agents-refresh
   "?" #'herdr-core-menu
   "n" #'herdr-core-agents-next-line
   "p" #'herdr-core-agents-previous-line)
 
 (defvar-local herdr-core--list-columns nil
-  "The `herdr-core-list-columns' this buffer's format was made from.")
+  "The `herdr-core-list-columns' the table state was made for.")
 
-(defvar-local herdr-core--marked nil "Marked addresses in the list buffer.")
+(defvar-local herdr-core--list-group-by 'unset
+  "The `herdr-core-group-by' the table state groups by.")
 
-(define-derived-mode herdr-core-agents-mode tabulated-list-mode "Herdr-Agents"
+(defvar-local herdr-core--agents-root nil
+  "The vui root instance of the list table.")
+
+(define-derived-mode herdr-core-agents-mode vui-mode "Herdr-Agents"
   "Live list of herdr-core agents on every machine, from `hc events'.
-RET or mouse-1 shows the agent, `a' attaches afresh with a prefix, `o'
-watches, `r' reads its screen, `s' sends a line, `b' jumps to the next
-blocked agent, `S' sorts, `G' groups, `m'/`u' mark and `v' shows the
-marked side by side, `/' narrows, `c' starts a new agent, `g' reconnects.
+A `vuistack-table': RET or mouse-1 shows the agent (the row action), `a'
+attaches afresh with a prefix, `o' watches, `r' reads its screen, `s'
+sends a line, `b' jumps to the next blocked agent, `S' sorts (with a
+prefix, adds to the multi-sort), `G' groups, `m'/`u' mark and `v' shows
+the marked side by side, `/' narrows and filters, `c' starts a new
+agent, `g' reconnects.  The table's own keys (`f' filter a column, `F'
+clear filters, `x' fold a group, `H'/`V' columns, `|' pin, ...) work too.
 \\{herdr-core-agents-mode-map}"
-  (setq tabulated-list-padding 2
-        tabulated-list-sort-key nil)
-  (herdr-core--agents-init-format)
-  (add-hook 'tabulated-list-revert-hook #'herdr-core--agents-revert nil t)
+  (setq truncate-lines t)
+  (setq-local revert-buffer-function (lambda (&rest _) (herdr-core-agents-refresh)))
   ;; The stream outlives this buffer only while `herdr-core-mode' wants it.
   (add-hook 'kill-buffer-hook
             (lambda () (unless (bound-and-true-p herdr-core-mode) (herdr-core-stop)))
             nil t))
 
-(defun herdr-core--agents-init-format ()
-  "Build `tabulated-list-format' from `herdr-core-list-columns'."
-  (setq herdr-core--list-columns herdr-core-list-columns
-        tabulated-list-format (vconcat (mapcar (lambda (c) (list (nth 0 c) (nth 1 c) t))
-                                               herdr-core-list-columns)))
-  (tabulated-list-init-header))
+(defun herdr-core--table-seeded-p ()
+  "Non-nil once the list table has state in this buffer."
+  (assoc herdr-core--table-id vuistack-table--table-states))
 
-(defun herdr-core--agent-entry (agent)
-  "Tabulated-list entry for AGENT, keyed by address."
-  (list (alist-get 'address agent)
-        (vconcat (mapcar (lambda (c) (or (funcall (nth 2 c) agent) "")) herdr-core--list-columns))))
+(defun herdr-core--table-get (key)
+  "KEY of the list table's state."
+  (plist-get (vuistack-table-state herdr-core--table-id) key))
 
-(defun herdr-core--narrowed (agents)
-  "AGENTS within the list buffer's narrowing."
-  (if-let* ((n herdr-core--list-narrow))
-      (seq-filter (lambda (a) (equal (alist-get (car n) a) (cdr n))) agents)
-    agents))
+(defun herdr-core--table-put (&rest plist)
+  "Set the keys of PLIST in the list table's state."
+  (cl-loop for (key value) on plist by #'cddr
+           do (vuistack-table--put herdr-core--table-id key value)))
 
-(defun herdr-core--agents-set-entries (agents)
-  "Store AGENTS and rebuild `tabulated-list-entries' from them."
+(defun herdr-core--sync-table-state ()
+  "Start the table state afresh when the columns changed; follow the grouping."
   (unless (equal herdr-core--list-columns herdr-core-list-columns)
-    (herdr-core--agents-init-format))
-  (setq herdr-core--agents (herdr-core--narrowed agents)
-        tabulated-list-entries (mapcar #'herdr-core--agent-entry herdr-core--agents)))
+    (setq herdr-core--list-columns herdr-core-list-columns)
+    (vuistack-table-reset-state))
+  (unless (equal herdr-core--list-group-by herdr-core-group-by)
+    (setq herdr-core--list-group-by herdr-core-group-by)
+    (when (herdr-core--table-seeded-p)
+      (herdr-core--table-put :grouping (and herdr-core-group-by (list (herdr-core--group-index)))
+                             :expanded t :page 0))))
 
-(defun herdr-core--list-print ()
-  "Print the list buffer, in groups when `herdr-core-group-by' is set, keeping point."
-  (if (not herdr-core-group-by)
-      (tabulated-list-print t)
-    (let* ((id (tabulated-list-get-id))
-           (col (current-column))
-           (sorter (and tabulated-list-sort-key (tabulated-list--get-sorter)))
-           (inhibit-read-only t))
-      (erase-buffer)
-      (dolist (group (herdr-core-groups herdr-core--agents))
-        (insert (propertize (concat (funcall herdr-core-group-header-function (car group) (cdr group)) "\n")
-                            'face 'herdr-core-group-header 'herdr-core-group (car group)))
-        (let ((entries (mapcar #'herdr-core--agent-entry (cdr group))))
-          (dolist (e (if sorter (sort entries sorter) entries))
-            (apply tabulated-list-printer e))))
-      (set-buffer-modified-p nil)
+(defun herdr-core--agents-props (agents)
+  "The props of the list table showing AGENTS."
+  (pcase-let ((`(,rows . ,headers) (herdr-core--agent-rows agents)))
+    (list :id herdr-core--table-id
+          :columns (herdr-core--table-columns headers)
+          :rows rows
+          :row-id (lambda (row) (plist-get row :address))
+          :action #'herdr-core--row-action
+          :enable-row-selection t
+          :page-size herdr-core-list-page-size
+          :initial-state `(:sort ,(herdr-core--default-sort)
+                           :grouping ,(and herdr-core-group-by (list (herdr-core--group-index)))
+                           :expanded t)
+          :empty (propertize "No agents (c starts one)" 'face 'shadow))))
+
+(defun herdr-core--goto-address (address &optional column)
+  "Move to ADDRESS's line (at COLUMN), else the first agent line."
+  (goto-char (point-min))
+  (let (found)
+    (while (and (not found) (not (eobp)))
+      (if (and address (equal (herdr-core--list-address) address))
+          (setq found t)
+        (forward-line 1)))
+    (if found
+        (move-to-column (or column 0))
       (goto-char (point-min))
-      (if-let* ((pos (and id (text-property-any (point-min) (point-max) 'tabulated-list-id id))))
-          (progn (goto-char pos) (move-to-column col))
-        (herdr-core--skip-header 1))))
-  (herdr-core--paint-marks))
+      (herdr-core--skip-header 1))))
+
+(defun herdr-core--agents-render ()
+  "Render the list table from the current agents, keeping point on its agent."
+  (let ((address (herdr-core--list-address))
+        (column (current-column))
+        (agents (herdr-core-list)))
+    (herdr-core--sync-table-state)
+    (setq herdr-core--agents agents)
+    (let ((props (herdr-core--agents-props agents)))
+      (if (and herdr-core--agents-root (eq herdr-core--agents-root vui--mounted-root))
+          (vui-update herdr-core--agents-root props)
+        (setq herdr-core--agents-root
+              (vui-mount (apply #'vui-component 'vuistack-table props) (buffer-name) t))))
+    (set-buffer-modified-p nil)
+    (herdr-core--goto-address address column)))
 
 (defun herdr-core--skip-header (dir)
-  "Move off group header lines in DIR (1 or -1)."
-  (while (and (not (tabulated-list-get-id))
+  "Move off lines without an agent (headers, group rows) in DIR (1 or -1)."
+  (while (and (not (herdr-core--list-address))
               (zerop (forward-line dir))
               (not (eobp)))))
 
 (defun herdr-core-agents-next-line (&optional n)
-  "Move to the next agent line (N times), skipping group headers."
+  "Move to the next agent line (N times), skipping headers and group rows."
   (interactive "p")
   (dotimes (_ (or n 1))
     (let ((here (point)))
       (forward-line 1)
       (herdr-core--skip-header 1)
-      (unless (tabulated-list-get-id) (goto-char here)))))
+      (unless (herdr-core--list-address) (goto-char here)))))
 
 (defun herdr-core-agents-previous-line (&optional n)
-  "Move to the previous agent line (N times), skipping group headers."
+  "Move to the previous agent line (N times), skipping headers and group rows."
   (interactive "p")
   (dotimes (_ (or n 1))
     (let ((here (point)))
       (forward-line -1)
       (herdr-core--skip-header -1)
-      (unless (tabulated-list-get-id) (goto-char here)))))
-
-(defun herdr-core--paint-marks ()
-  "Show marks in the padding of marked lines."
-  (when herdr-core--marked
-    (save-excursion
-      (goto-char (point-min))
-      (while (not (eobp))
-        (when-let* ((id (tabulated-list-get-id)))
-          (when (member id herdr-core--marked)
-            (tabulated-list-put-tag ">")))
-        (forward-line 1)))))
+      (unless (herdr-core--list-address) (goto-char here)))))
 
 (defun herdr-core--refresh ()
   "Redraw the list buffer (keeping point), buffer names, read buffers and the mode line."
@@ -2630,8 +2802,7 @@ marked side by side, `/' narrows, `c' starts a new agent, `g' reconnects.
   (when-let* ((buf (get-buffer herdr-core--agents-buffer-name)))
     (with-current-buffer buf
       (when (derived-mode-p 'herdr-core-agents-mode)
-        (herdr-core--agents-set-entries (herdr-core-list))
-        (herdr-core--list-print))))
+        (herdr-core--agents-render))))
   (herdr-core--sync-attach-buffer-names)
   (when herdr-core-read-follow (herdr-core--follow-reads))
   (force-mode-line-update t)
@@ -2642,14 +2813,15 @@ marked side by side, `/' narrows, `c' starts a new agent, `g' reconnects.
   (unless herdr-core--refresh-timer
     (setq herdr-core--refresh-timer (run-at-time herdr-core-refresh-delay nil #'herdr-core--refresh))))
 
-(defun herdr-core--agents-revert ()
-  "Reconnect for a fresh snapshot (for `revert-buffer'), listing what is known."
+(defun herdr-core-agents-refresh ()
+  "Reconnect for a fresh snapshot, listing what is known meanwhile."
+  (interactive)
   (herdr-core-reconnect)
-  (herdr-core--agents-set-entries (herdr-core-list)))
+  (herdr-core--agents-render))
 
 (defun herdr-core--agent-at-point ()
   "Agent alist for the list-buffer row at point."
-  (let ((address (tabulated-list-get-id)))
+  (let ((address (herdr-core--list-address)))
     (or (and address (or (herdr-core--find-agent address)
                          (seq-find (lambda (a) (equal (alist-get 'address a) address))
                                    herdr-core--agents)))
@@ -2660,29 +2832,45 @@ marked side by side, `/' narrows, `c' starts a new agent, `g' reconnects.
 
 (defun herdr-core--agents-redraw ()
   "Rebuild and print the list buffer."
-  (herdr-core--agents-set-entries (herdr-core-list))
-  (herdr-core--list-print))
+  (herdr-core--agents-render))
 
-(defun herdr-core-agents-sort ()
+(defun herdr-core--sort-choices ()
+  "Column headers `herdr-core-agents-sort' offers, with their indices."
+  (append (seq-filter (lambda (c) (not (string-empty-p (car c))))
+                      (seq-map-indexed (lambda (spec i) (cons (car spec) i))
+                                       herdr-core-list-columns))
+          (list (cons "changed" (herdr-core--helper-index 'changed)))))
+
+(defun herdr-core-agents-sort (&optional multi)
   "Pick a column to sort by; picking the current one reverses the order.
-The attention entry restores the default `herdr-core-sort-predicate' order."
-  (interactive)
-  (let* ((columns (mapcar #'car tabulated-list-format))
-         (choice (completing-read "Sort by: "
-                                  (cons herdr-core--attention-sort-label columns)
-                                  nil t))
-         (current tabulated-list-sort-key))
-    (setq tabulated-list-sort-key
-          (cond ((equal choice herdr-core--attention-sort-label) nil)
-                ((equal choice (car current)) (cons choice (not (cdr current))))
-                (t (cons choice nil))))
-    (tabulated-list-init-header)
-    ;; `tabulated-list-print' sorts the entries list destructively, so
-    ;; rebuild it before printing in the new order.
+The attention entry restores the default sort (`herdr-core-sort-predicate').
+With prefix MULTI, add the column to the multi-sort (again: reverse it,
+a third time: drop it).  The table's state keeps the sort across updates."
+  (interactive "P")
+  (let* ((choices (herdr-core--sort-choices))
+         (at (get-text-property (point) 'vuistack-table-column-index))
+         (default (car (rassoc at choices)))
+         (choice (completing-read (format-prompt "Sort by" default)
+                                  (cons herdr-core--attention-sort-label (mapcar #'car choices))
+                                  nil t nil nil default))
+         (index (cdr (assoc choice choices)))
+         (sorts (vuistack-table--sort-list (herdr-core--table-get :sort)))
+         (current (assq index sorts))
+         (next (and index (cons index (if current (not (cdr current))
+                                        (equal choice "changed"))))))
+    (herdr-core--table-put
+     :page 0
+     :sort (cond ((null index) (herdr-core--default-sort))
+                 ((not multi) (list next))
+                 ((null current) (append sorts (list next)))
+                 ((eq (cdr current) (equal choice "changed"))
+                  (mapcar (lambda (s) (if (eq s current) next s)) sorts))
+                 (t (remq current sorts))))
     (herdr-core--agents-redraw)))
 
 (defun herdr-core-agents-group (by)
-  "Group this list BY machine, space, tab, kind, status or nothing."
+  "Group this list BY machine, space, tab, kind, status or nothing.
+The groups are the table's grouping: `x' folds one, `X' all."
   (interactive
    (list (let ((c (completing-read "Group by: " '("none" "machine" "space" "tab" "kind" "status")
                                    nil t)))
@@ -2691,11 +2879,17 @@ The attention entry restores the default `herdr-core-sort-predicate' order."
   (herdr-core--agents-redraw))
 
 (defun herdr-core--narrow (key prompt)
-  "Narrow the list to agents whose KEY is one read with PROMPT."
+  "Narrow the list to agents whose KEY is one read with PROMPT.
+The narrowing is an exact column filter on the table's KEY column."
   (let* ((values (delete-dups (delq nil (mapcar (lambda (a) (alist-get key a)) (herdr-core-list)))))
          (here (ignore-errors (alist-get key (herdr-core--agent-at-point))))
-         (value (completing-read prompt values nil t nil nil here)))
-    (setq herdr-core--list-narrow (cons key value))
+         (value (completing-read prompt values nil t nil nil here))
+         (narrowing (mapcar #'herdr-core--helper-index '(machine space tab))))
+    (herdr-core--table-put
+     :page 0
+     :column-filters (append (seq-remove (lambda (f) (memq (car f) narrowing))
+                                         (herdr-core--table-get :column-filters))
+                             (list (cons (herdr-core--helper-index key) (concat "==" value)))))
     (herdr-core--agents-redraw)
     (message "herdr-core: showing %s %s (/ / widens)" key value)))
 
@@ -2715,35 +2909,40 @@ The attention entry restores the default `herdr-core-sort-predicate' order."
   (herdr-core--narrow 'tab "Tab: "))
 
 (defun herdr-core-agents-widen ()
-  "Show every agent again."
+  "Show every agent again: drop the narrowing and every filter."
   (interactive)
-  (setq herdr-core--list-narrow nil)
+  (herdr-core--table-put :filter nil :column-filters nil :page 0)
   (herdr-core--agents-redraw))
 
+(defun herdr-core-agents-marked ()
+  "Addresses of the marked (selected) agents still listed, in marking order."
+  (seq-filter #'herdr-core--find-agent (herdr-core--table-get :selected)))
+
+(defun herdr-core--set-marked (address marked)
+  "Mark ADDRESS when MARKED, else unmark it; then go to the next agent."
+  (let ((selected (remove address (herdr-core--table-get :selected))))
+    (herdr-core--table-put :selected (if marked (append selected (list address)) selected)))
+  (herdr-core--agents-redraw)
+  (herdr-core-agents-next-line))
+
 (defun herdr-core-agents-mark ()
-  "Mark the agent at point for `herdr-core-agents-show-marked'."
+  "Mark (select) the agent at point for `herdr-core-agents-show-marked'."
   (interactive)
-  (let ((id (alist-get 'address (herdr-core--agent-at-point))))
-    (unless (member id herdr-core--marked)
-      (setq herdr-core--marked (append herdr-core--marked (list id))))
-    (tabulated-list-put-tag ">")
-    (herdr-core-agents-next-line)))
+  (herdr-core--set-marked (alist-get 'address (herdr-core--agent-at-point)) t))
 
 (defun herdr-core-agents-unmark ()
   "Unmark the agent at point."
   (interactive)
-  (let ((id (alist-get 'address (herdr-core--agent-at-point))))
-    (setq herdr-core--marked (delete id herdr-core--marked))
-    (tabulated-list-put-tag " ")
-    (herdr-core-agents-next-line)))
+  (herdr-core--set-marked (alist-get 'address (herdr-core--agent-at-point)) nil))
 
 (defun herdr-core-agents-show-marked (&optional observe)
   "Show the marked agents (else the one at point) side by side.
 With prefix OBSERVE, watch only."
   (interactive "P")
-  (let ((agents (or (delq nil (mapcar #'herdr-core--find-agent herdr-core--marked))
+  (let ((agents (or (delq nil (mapcar #'herdr-core--find-agent (herdr-core-agents-marked)))
                     (list (herdr-core--agent-at-point)))))
-    (setq herdr-core--marked nil)
+    (herdr-core--table-put :selected nil)
+    (herdr-core--agents-redraw)
     (herdr-core-show-several agents observe)))
 
 (defun herdr-core-agents-mouse-show (event)
@@ -2755,9 +2954,11 @@ With prefix OBSERVE, watch only."
     (herdr-core-agents-show)))
 
 (defun herdr-core-agents-show (&optional reattach)
-  "Show the agent at point in this window; with prefix REATTACH, afresh."
+  "Show the agent at point in this window; with prefix REATTACH, afresh.
+Runs the table's row action (`vuistack-table-activate') on a cell."
   (interactive "P")
-  (herdr-core--attach-agent (herdr-core--agent-at-point) reattach))
+  (unless (and (not reattach) (vuistack-table-activate))
+    (herdr-core--attach-agent (herdr-core--agent-at-point) reattach)))
 
 (defun herdr-core-agents-attach (&optional reattach)
   "Attach to the agent at point in its own buffer, in this window.
@@ -2789,7 +2990,7 @@ With prefix REATTACH, replace an existing buffer with a fresh attach."
 
 (defun herdr-core-agents-rename (title)
   "Set the session TITLE of the agent at point."
-  (interactive (list (read-string "Title: " (herdr-core-title (tabulated-list-get-id)))))
+  (interactive (list (read-string "Title: " (herdr-core-title (herdr-core--list-address)))))
   (herdr-core-rename-agent (herdr-core--agent-at-point) title))
 
 (defun herdr-core-agents-kill ()
@@ -2804,7 +3005,8 @@ With prefix REATTACH, replace an existing buffer with a fresh attach."
     (save-excursion
       (goto-char (point-min))
       (while (not (eobp))
-        (when (equal (alist-get 'status (herdr-core--find-agent (tabulated-list-get-id))) "blocked")
+        (when (equal (alist-get 'status (herdr-core--find-agent (herdr-core--list-address)))
+                     "blocked")
           (unless first (setq first (point)))
           (when (and (not next) (> (point) here)) (setq next (point))))
         (forward-line 1)))
@@ -2821,7 +3023,7 @@ With prefix REATTACH, replace an existing buffer with a fresh attach."
       (unless (derived-mode-p 'herdr-core-agents-mode)
         (herdr-core-agents-mode))
       (herdr-core-start)
-      (herdr-core--agents-redraw))
+      (herdr-core--agents-render))
     (pop-to-buffer buf (herdr-core--display-action 'list))))
 
 ;;; Keymap and transient menu
