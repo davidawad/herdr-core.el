@@ -73,7 +73,7 @@
   "Each defcustom is in one area group under `herdr-core' and README.org documents it."
   (let ((areas '(herdr-core-backend herdr-core-events herdr-core-agents herdr-core-list
                  herdr-core-picker herdr-core-display herdr-core-render herdr-core-launcher
-                 herdr-core-notify herdr-core-keys herdr-core-faces))
+                 herdr-core-notify herdr-core-keys herdr-core-faces herdr-core-control))
         (readme (with-temp-buffer
                   (insert-file-contents (expand-file-name "../README.org" test-herdr-core--dir))
                   (buffer-string)))
@@ -1132,6 +1132,42 @@ it, wait on it, and see a pod machine's kind from `hc machine ls'."
           (funcall hc nil "server" "stop")
           (funcall hc pod-env "server" "stop")
           (delete-directory root t))))))
+
+(ert-deftest herdr-core-follow-shows-the-row-agent-in-the-follow-window ()
+  "Follow mode shows the agent under the cursor in the follow window, once per row."
+  (let ((shown nil) (address "t1")
+        (agents '(((address . "t1") (name . "one")) ((address . "t2") (name . "two")))))
+    (cl-letf (((symbol-function 'herdr-core--list-address) (lambda (&rest _) address))
+              ((symbol-function 'herdr-core--find-agent)
+               (lambda (a) (seq-find (lambda (x) (equal (alist-get 'address x) a)) agents)))
+              ((symbol-function 'herdr-core-attach-in-window)
+               (lambda (w agent &optional observe) (push (list w (alist-get 'name agent) observe) shown))))
+      (save-window-excursion
+        (delete-other-windows)
+        (let ((follow (split-window nil nil 'right)))
+          (with-temp-buffer
+            (set-window-buffer (selected-window) (current-buffer))
+            (setq herdr-core--follow-window follow)
+            (herdr-core-follow-mode 1)
+            (herdr-core-follow-update)
+            (herdr-core-follow-update)
+            (should (equal shown (list (list follow "one" nil))))
+            (setq address "t2")
+            (let ((herdr-core-control-follow 'observe)) (herdr-core-follow-update))
+            (should (equal (car shown) (list follow "two" t)))
+            (should (memq #'herdr-core--follow-schedule post-command-hook))
+            (herdr-core-follow-mode -1)
+            (should-not (memq #'herdr-core--follow-schedule post-command-hook))))))))
+
+(ert-deftest herdr-core-follow-schedule-debounces ()
+  "Motion only schedules: the follow window changes once the cursor rests."
+  (let ((herdr-core-control-debounce 0.05) (calls 0))
+    (cl-letf (((symbol-function 'herdr-core-follow-update) (lambda (&rest _) (cl-incf calls))))
+      (with-temp-buffer
+        (dotimes (_ 5) (herdr-core--follow-schedule))
+        (should (= calls 0))
+        (should (timerp herdr-core--follow-timer))
+        (cancel-timer herdr-core--follow-timer)))))
 
 (provide 'test-herdr-core-features)
 ;;; test-herdr-core-features.el ends here

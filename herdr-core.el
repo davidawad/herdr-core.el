@@ -3174,5 +3174,131 @@ With prefix REATTACH, replace an existing buffer with a fresh attach."
 
 (custom-add-to-group 'herdr-core-notify 'herdr-core-mode-hook 'custom-variable)
 
+;;; Control: the list on the left, the agent at its cursor on the right
+
+(defgroup herdr-core-control nil
+  "`herdr-core-control': the agent list beside a window that follows its cursor."
+  :group 'herdr-core)
+
+(defcustom herdr-core-control-list-width 0.32
+  "Width of the list in `herdr-core-control': a fraction of the frame, or columns."
+  :type 'number
+  :group 'herdr-core-control)
+
+(defcustom herdr-core-control-follow 'attach
+  "What the follow window shows for the agent under the list cursor.
+`attach' types into it, `observe' watches it, `read' shows its screen and
+history (hc read).  Attached buffers are kept, so going back is a swap."
+  :type '(choice (const attach) (const observe) (const read))
+  :group 'herdr-core-control)
+
+(defcustom herdr-core-control-debounce 0.2
+  "Seconds the list cursor must rest on a row before the follow window changes.
+Holding a motion key changes it once, where it stops."
+  :type 'number
+  :group 'herdr-core-control)
+
+(defcustom herdr-core-control-follow-functions nil
+  "Called with the agent alist each time the follow window shows a new agent."
+  :type 'hook
+  :group 'herdr-core-control)
+
+(defvar-local herdr-core--follow-window nil
+  "The window this list buffer's follow mode shows agents in.")
+(defvar-local herdr-core--follow-address nil
+  "The address the follow window shows.")
+(defvar-local herdr-core--follow-timer nil
+  "Pending follow update.")
+
+(defun herdr-core--follow-window-live ()
+  "This list's follow window, or the window to the right of the list's window."
+  (or (and (window-live-p herdr-core--follow-window) herdr-core--follow-window)
+      (when-let* ((list (get-buffer-window (current-buffer)))
+                  (w (window-in-direction 'right list)))
+        (setq herdr-core--follow-window w))))
+
+(defun herdr-core--follow-show (window agent)
+  "Show AGENT in WINDOW the way `herdr-core-control-follow' says; keep focus."
+  (save-selected-window
+    (pcase herdr-core-control-follow
+      ('read
+       (let ((address (alist-get 'address agent)))
+         (herdr-core--read address t)
+         (set-window-buffer window (or (herdr-core--find-read-buffer address)
+                                       (get-buffer-create (herdr-core-buffer-name address "read"))))))
+      (mode (herdr-core-attach-in-window window agent (eq mode 'observe))))))
+
+(defun herdr-core-follow-update (&optional force)
+  "Show the agent under the list cursor in the follow window.
+With FORCE, show it again even when it is already there."
+  (interactive (list t))
+  (setq herdr-core--follow-timer nil)
+  (when-let* ((window (herdr-core--follow-window-live))
+              (address (herdr-core--list-address)))
+    (unless (and (not force) (equal address herdr-core--follow-address)
+                 (window-live-p window))
+      (when-let* ((agent (or (herdr-core--find-agent address)
+                             (seq-find (lambda (a) (equal (alist-get 'address a) address))
+                                       herdr-core--agents))))
+        (setq herdr-core--follow-address address)
+        (herdr-core--follow-show window agent)
+        (run-hook-with-args 'herdr-core-control-follow-functions agent)))))
+
+(defun herdr-core--follow-schedule ()
+  "After a command in the list: show the row's agent once the cursor rests."
+  (when herdr-core--follow-timer (cancel-timer herdr-core--follow-timer))
+  (let ((buf (current-buffer)))
+    (setq herdr-core--follow-timer
+          (run-with-idle-timer
+           herdr-core-control-debounce nil
+           (lambda ()
+             (when (buffer-live-p buf)
+               (with-current-buffer buf (herdr-core-follow-update))))))))
+
+(defun herdr-core-follow-focus ()
+  "Move to the follow window, to type into the agent shown there."
+  (interactive)
+  (herdr-core-follow-update)
+  (when-let* ((w (herdr-core--follow-window-live))) (select-window w)))
+
+(defvar-keymap herdr-core-follow-mode-map
+  "TAB" #'herdr-core-follow-focus
+  "C-c C-f" #'herdr-core-follow-update)
+
+(define-minor-mode herdr-core-follow-mode
+  "In the agent list: the window to its right shows the agent under the cursor.
+TAB moves into that window; `herdr-core-control-follow' says how it shows."
+  :lighter " Follow"
+  :group 'herdr-core-control
+  :keymap herdr-core-follow-mode-map
+  (if herdr-core-follow-mode
+      (add-hook 'post-command-hook #'herdr-core--follow-schedule nil t)
+    (remove-hook 'post-command-hook #'herdr-core--follow-schedule t)
+    (when herdr-core--follow-timer (cancel-timer herdr-core--follow-timer))
+    (setq herdr-core--follow-timer nil herdr-core--follow-address nil)))
+
+;; A buffer-local minor mode's hook joins no group on its own.
+(custom-add-to-group 'herdr-core-control 'herdr-core-follow-mode-hook 'custom-variable)
+
+;;;###autoload
+(defun herdr-core-control ()
+  "The agent list on the left, the agent under its cursor on the right.
+Moving the cursor switches the right side (`herdr-core-control-follow');
+TAB goes into it.  The list is `herdr-core-agents'."
+  (interactive)
+  (delete-other-windows)
+  (let* ((list-window (selected-window))
+         (width (if (floatp herdr-core-control-list-width)
+                    (round (* herdr-core-control-list-width (frame-width)))
+                  herdr-core-control-list-width))
+         (follow (split-window list-window width 'right)))
+    (herdr-core-agents)
+    (set-window-buffer list-window (get-buffer herdr-core--agents-buffer-name))
+    (select-window list-window)
+    (with-current-buffer herdr-core--agents-buffer-name
+      (setq herdr-core--follow-window follow herdr-core--follow-address nil)
+      (herdr-core-follow-mode 1)
+      (herdr-core-follow-update))))
+
 (provide 'herdr-core)
 ;;; herdr-core.el ends here
