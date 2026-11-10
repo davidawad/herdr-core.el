@@ -2768,9 +2768,17 @@ clear filters, `x' fold a group, `H'/`V' columns, `|' pin, ...) work too.
       (if (and herdr-core--agents-root (eq herdr-core--agents-root vui--mounted-root))
           (vui-update herdr-core--agents-root props)
         (setq herdr-core--agents-root
-              (vui-mount (apply #'vui-component 'vuistack-table props) (buffer-name) t))))
+              (herdr-core--vui-mount (apply #'vui-component 'vuistack-table props) (buffer-name)))))
     (set-buffer-modified-p nil)
     (herdr-core--goto-address address column)))
+
+(defun herdr-core--vui-mount (vnode name)
+  "Mount VNODE in buffer NAME without showing it, on any vui.
+A vui whose `vui-mount' has no NO-DISPLAY argument shows the buffer, so
+the window configuration is restored around it."
+  (if (>= (or (cdr-safe (func-arity #'vui-mount)) 0) 3)
+      (vui-mount vnode name t)
+    (save-window-excursion (save-current-buffer (vui-mount vnode name)))))
 
 (defun herdr-core--skip-header (dir)
   "Move off lines without an agent (headers, group rows) in DIR (1 or -1)."
