@@ -79,6 +79,8 @@
       (accept-process-output nil 0.05))
     (funcall pred)))
 
+;;;; Hidden renders and the list cache
+
 (defun test-herdr-core--agents-buffer ()
   "Create and return a clean herdr agents buffer for refresh tests."
   (let ((buf (get-buffer-create herdr-core--agents-buffer-name)))
@@ -87,61 +89,112 @@
       (setq herdr-core--agents-dirty nil))
     buf))
 
+(defun test-herdr-core--visible-count ()
+  "How many terminals pass `herdr-core--visible-p': one filter pass's calls."
+  (let ((n 0))
+    (maphash (lambda (_ r) (when (herdr-core--visible-p r) (setq n (1+ n)))) herdr-core--terminals)
+    n))
+
 (ert-deftest herdr-core-refresh-defers-hidden-agents-render-until-shown-once ()
+  "A refresh of a hidden list only marks it dirty; showing it renders once, as Emacs
+calls the buffer-local `window-buffer-change-functions' (with the window)."
   (test-herdr-core--fresh
+    (test-herdr-core--load-snapshot)
     (let ((buf (test-herdr-core--agents-buffer))
-          (visible nil)
+          (other (get-buffer-create " *herdr-core-test-other*"))
+          (window (selected-window))
           (renders 0))
+      (let ((count (lambda (&rest _) (setq renders (1+ renders)))))
+        (unwind-protect
+            (progn
+              (advice-add 'herdr-core--agents-render :after count)
+              (set-window-buffer window other)
+              (should-not (get-buffer-window buf t))
+              (herdr-core--refresh)
+              (should (= renders 0))
+              (should (buffer-local-value 'herdr-core--agents-dirty buf))
+              (apply #'test-herdr-core--feed (test-herdr-core--lines "changes.jsonl"))
+              (herdr-core--refresh)
+              (herdr-core--refresh)
+              (should (= renders 0))
+              (should (memq #'herdr-core--window-buffer-changed
+                            (buffer-local-value 'window-buffer-change-functions buf)))
+              (set-window-buffer window buf)
+              (with-current-buffer buf
+                (run-hook-with-args 'window-buffer-change-functions (selected-window)))
+              (should (= renders 1))
+              (should-not (buffer-local-value 'herdr-core--agents-dirty buf))
+              ;; The newest data: orion/t2 turned blocked in changes.jsonl.
+              (with-current-buffer buf
+                (should (equal (test-herdr-core--first-agent) "orion/t2")))
+              (with-current-buffer buf
+                (run-hook-with-args 'window-buffer-change-functions (selected-window)))
+              (should (= renders 1))
+              ;; Shown: a refresh renders at once.
+              (herdr-core--refresh)
+              (should (= renders 2)))
+          (advice-remove 'herdr-core--agents-render count)
+          (set-window-buffer window other)
+          (kill-buffer other)
+          (when (buffer-live-p buf) (kill-buffer buf)))))))
+
+(ert-deftest herdr-core-event-refresh-and-mode-line-run-one-filter-pass ()
+  "An event, the refresh after it and three mode-line segments filter the terminals once."
+  (test-herdr-core--fresh
+    (let* ((calls 0)
+           (herdr-core-filter-functions (list (lambda (_) (setq calls (1+ calls)) t)))
+           (herdr-core-mode-line-statuses '("blocked"))
+           (buf nil))
+      (test-herdr-core--load-snapshot)
+      (setq buf (test-herdr-core--agents-buffer))
       (unwind-protect
-          (cl-letf (((symbol-function 'get-buffer-window)
-                     (lambda (buffer &optional _all-frames)
-                       (and (eq buffer buf) visible)))
-                    ((symbol-function 'window-buffer) (lambda (_window) buf))
-                    ((symbol-function 'herdr-core--agents-render)
-                     (lambda ()
-                       (setq renders (1+ renders)
-                             herdr-core--agents-dirty nil)))
-                    ((symbol-function 'herdr-core--sync-attach-buffer-names) #'ignore)
-                    ((symbol-function 'herdr-core--follow-reads) #'ignore))
+          (progn
+            (set-window-buffer (selected-window) buf)
+            (herdr-core-list)
+            (setq calls 0)
+            (test-herdr-core--feed (car (test-herdr-core--lines "changes.jsonl")))
             (herdr-core--refresh)
-            (should (= renders 0))
-            (should (buffer-local-value 'herdr-core--agents-dirty buf))
-            (herdr-core--refresh)
-            (herdr-core--refresh)
-            (should (= renders 0))
-            (setq visible t)
-            (herdr-core--window-buffer-changed 'test-window nil)
-            (should (= renders 1))
-            (should-not (buffer-local-value 'herdr-core--agents-dirty buf))
-            (herdr-core--window-buffer-changed 'test-window nil)
-            (should (= renders 1)))
+            (dotimes (_ 3) (should (stringp (herdr-core-mode-line-segment))))
+            (should (> (test-herdr-core--visible-count) 0))
+            (should (= calls (test-herdr-core--visible-count)))
+            (should (= (herdr-core-count '("blocked")) 2)))
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
-(ert-deftest herdr-core-visible-refresh-renders-once-and-computes-agents-once ()
+(ert-deftest herdr-core-list-cache-follows-terminals-filters-and-sort ()
+  "The list is computed afresh when the terminals, the filter functions or the
+sort predicate change, and each call returns a list its caller may change."
   (test-herdr-core--fresh
-    (let ((buf (test-herdr-core--agents-buffer))
-          (renders 0)
-          (status-passes 0)
-          (render (symbol-function 'herdr-core--agents-render)))
-      (unwind-protect
-          (cl-letf (((symbol-function 'get-buffer-window)
-                     (lambda (buffer &optional _all-frames) (and (eq buffer buf) t)))
-                    ((symbol-function 'herdr-core-list)
-                     (lambda () (setq status-passes (1+ status-passes)) nil))
-                    ((symbol-function 'herdr-core--agents-props)
-                     (lambda (_agents) nil))
-                    ((symbol-function 'herdr-core--sync-table-state) #'ignore)
-                    ((symbol-function 'herdr-core--vui-root) (lambda () nil))
-                    ((symbol-function 'herdr-core--vui-mount) (lambda (&rest _) nil))
-                    ((symbol-function 'herdr-core--goto-address) #'ignore)
-                    ((symbol-function 'herdr-core--sync-attach-buffer-names) #'ignore)
-                    ((symbol-function 'herdr-core--follow-reads) #'ignore))
-            (cl-letf (((symbol-function 'herdr-core--agents-render)
-                       (lambda () (setq renders (1+ renders)) (funcall render))))
-              (herdr-core--refresh)
-              (should (= renders 1))
-              (should (= status-passes 1))))
-        (when (buffer-live-p buf) (kill-buffer buf))))))
+    (let* ((calls 0)
+           (counting (lambda (_) (setq calls (1+ calls)) t))
+           (herdr-core-filter-functions (list counting)))
+      (test-herdr-core--load-snapshot)
+      (let ((first (herdr-core-list)))
+        (setq calls 0)
+        (let ((second (herdr-core-list)))
+          (should (= calls 0))
+          (should (equal first second))
+          (should-not (eq first second))
+          ;; A caller sorting its copy leaves the cache as it was.
+          (sort second #'herdr-core-sort-by-address)
+          (should (equal (herdr-core-list) first))))
+      (should (= calls 0))
+      ;; The terminals change.
+      (test-herdr-core--feed (car (test-herdr-core--lines "changes.jsonl")))
+      (should (> calls 0))
+      (setq calls 0)
+      (should (equal (car (test-herdr-core--addresses)) "orion/t2"))
+      (should (= calls 0))
+      ;; The filter functions change.
+      (let ((herdr-core-filter-functions
+             (list counting (lambda (a) (not (equal (alist-get 'address a) "orion/t2"))))))
+        (should-not (member "orion/t2" (test-herdr-core--addresses)))
+        (should (> calls 0)))
+      (should (member "orion/t2" (test-herdr-core--addresses)))
+      ;; The sort predicate changes.
+      (let ((herdr-core-sort-predicate #'herdr-core-sort-by-address))
+        (let ((addresses (test-herdr-core--addresses)))
+          (should (equal addresses (sort (copy-sequence addresses) #'string<)))))
+      (should (equal (car (test-herdr-core--addresses)) "orion/t2")))))
 
 ;;;; The fake hc
 

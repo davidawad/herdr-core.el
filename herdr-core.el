@@ -758,7 +758,14 @@ DESCRIPTION is a string or a function returning one."
 (defconst herdr-core--agents-buffer-name "*herdr-core-agents*")
 
 (defvar herdr-core--terminals (make-hash-table :test 'equal)
-  "hc terminal records by address (`t3', `orion/t1'), as hc reports them.")
+  "hc terminal records by address (`t3', `orion/t1'), as hc reports them.
+Call `herdr-core--terminals-changed' after writing it.")
+
+(defvar herdr-core--terminals-generation 0
+  "Bumped by `herdr-core--terminals-changed' at each write of `herdr-core--terminals'.")
+
+(defvar herdr-core--list-cache nil
+  "(KEY . AGENTS): `herdr-core-list's last result and the inputs it was made from.")
 
 (defvar herdr-core--snapshot-seen nil
   "Non-nil once the state is a whole snapshot (the stream's, or a poll).")
@@ -871,16 +878,33 @@ DESCRIPTION is a string or a function returning one."
   "Sort AGENTS by `herdr-core-sort-predicate'."
   (sort agents herdr-core-sort-predicate))
 
+(defun herdr-core--terminals-changed ()
+  "Note a write of `herdr-core--terminals': `herdr-core-list' computes afresh."
+  (setq herdr-core--terminals-generation (1+ herdr-core--terminals-generation)))
+
+(defun herdr-core--list-key ()
+  "Everything `herdr-core-list' depends on, compared with `eq'."
+  (list herdr-core--terminals-generation herdr-core--terminals
+        herdr-core-filter-functions herdr-core-sort-predicate
+        herdr-core-show-finished herdr-core-labelled-only herdr-core-hidden-machines
+        herdr-core-title-label herdr-core-space-label herdr-core-tab-label))
+
 (defun herdr-core-list ()
-  "The visible agents, sorted by `herdr-core-sort-predicate'."
-  (let (agents)
-    (maphash (lambda (_ r)
-               (when (herdr-core--visible-p r)
-                 (let ((agent (herdr-core--agent r)))
-                   (when (run-hook-with-args-until-failure 'herdr-core-filter-functions agent)
-                     (push agent agents)))))
-             herdr-core--terminals)
-    (herdr-core--sort-agents agents)))
+  "The visible agents, sorted by `herdr-core-sort-predicate'.
+Computed once per change of the terminals or of the options that shape the
+list; each call returns a fresh list (of shared agent alists)."
+  (let ((key (herdr-core--list-key)))
+    (unless (and herdr-core--list-cache
+                 (seq-every-p #'identity (seq-mapn #'eq key (car herdr-core--list-cache))))
+      (let (agents)
+        (maphash (lambda (_ r)
+                   (when (herdr-core--visible-p r)
+                     (let ((agent (herdr-core--agent r)))
+                       (when (run-hook-with-args-until-failure 'herdr-core-filter-functions agent)
+                         (push agent agents)))))
+                 herdr-core--terminals)
+        (setq herdr-core--list-cache (cons key (herdr-core--sort-agents agents)))))
+    (copy-sequence (cdr herdr-core--list-cache))))
 
 (defun herdr-core-count (statuses)
   "How many visible agents have one of STATUSES."
@@ -944,12 +968,14 @@ DESCRIPTION is a string or a function returning one."
   (clrhash herdr-core--terminals)
   (dolist (r terminals)
     (puthash (alist-get 'address r) r herdr-core--terminals))
+  (herdr-core--terminals-changed)
   (setq herdr-core--snapshot-seen t))
 
 (defun herdr-core--update (address fn)
   "Set ADDRESS's record to (FN RECORD) when there is one."
   (when-let* ((record (gethash address herdr-core--terminals)))
-    (puthash address (funcall fn (copy-alist record)) herdr-core--terminals)))
+    (puthash address (funcall fn (copy-alist record)) herdr-core--terminals)
+    (herdr-core--terminals-changed)))
 
 (defun herdr-core--merge (record data &optional skip)
   "RECORD with DATA's keys set, but not those in SKIP."
@@ -968,10 +994,12 @@ DESCRIPTION is a string or a function returning one."
     (when address
       (pcase type
         ("created" (puthash address data herdr-core--terminals)
+         (herdr-core--terminals-changed)
          (unless (or (equal (herdr-core--machine address) "local")
                      (assoc (herdr-core--machine address) herdr-core--machine-names-cache))
            (herdr-core--refresh-machines)))
-        ("removed" (remhash address herdr-core--terminals))
+        ("removed" (remhash address herdr-core--terminals)
+         (herdr-core--terminals-changed))
         ("status" (herdr-core--update address (lambda (r) (herdr-core--merge r data '(address state)))))
         ("finished" (herdr-core--update address (lambda (r) (setf (alist-get 'state r) "finished")
                                                   (herdr-core--merge r data '(address state)))))
@@ -2706,7 +2734,9 @@ clear filters, `x' fold a group, `H'/`V' columns, `|' pin, ...) work too.
   ;; The stream outlives this buffer only while `herdr-core-mode' wants it.
   (add-hook 'kill-buffer-hook
             (lambda () (unless (bound-and-true-p herdr-core-mode) (herdr-core-stop)))
-            nil t))
+            nil t)
+  ;; Refreshes while hidden only mark the list dirty; render it when shown.
+  (add-hook 'window-buffer-change-functions #'herdr-core--window-buffer-changed nil t))
 
 (defun herdr-core--table-seeded-p ()
   "Non-nil once the list table has state in this buffer."
@@ -2785,11 +2815,10 @@ clear filters, `x' fold a group, `H'/`V' columns, `|' pin, ...) work too.
       (when (derived-mode-p 'herdr-core-agents-mode)
         (herdr-core--agents-render)))))
 
-(defun herdr-core--window-buffer-changed (window _previous-buffer)
-  "Render a dirty herdr agents buffer newly displayed in WINDOW."
+(defun herdr-core--window-buffer-changed (window)
+  "Render a dirty herdr agents buffer newly displayed in WINDOW.
+On `window-buffer-change-functions' buffer-locally, so called with the window."
   (herdr-core--maybe-render-agents (window-buffer window)))
-
-(add-hook 'window-buffer-change-functions #'herdr-core--window-buffer-changed)
 
 (defun herdr-core--vui-root ()
   "The vui root instance mounted in this buffer, on any vui.
