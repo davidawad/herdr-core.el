@@ -79,6 +79,70 @@
       (accept-process-output nil 0.05))
     (funcall pred)))
 
+(defun test-herdr-core--agents-buffer ()
+  "Create and return a clean herdr agents buffer for refresh tests."
+  (let ((buf (get-buffer-create herdr-core--agents-buffer-name)))
+    (with-current-buffer buf
+      (herdr-core-agents-mode)
+      (setq herdr-core--agents-dirty nil))
+    buf))
+
+(ert-deftest herdr-core-refresh-defers-hidden-agents-render-until-shown-once ()
+  (test-herdr-core--fresh
+    (let ((buf (test-herdr-core--agents-buffer))
+          (visible nil)
+          (renders 0))
+      (unwind-protect
+          (cl-letf (((symbol-function 'get-buffer-window)
+                     (lambda (buffer &optional _all-frames)
+                       (and (eq buffer buf) visible)))
+                    ((symbol-function 'window-buffer) (lambda (_window) buf))
+                    ((symbol-function 'herdr-core--agents-render)
+                     (lambda ()
+                       (setq renders (1+ renders)
+                             herdr-core--agents-dirty nil)))
+                    ((symbol-function 'herdr-core--sync-attach-buffer-names) #'ignore)
+                    ((symbol-function 'herdr-core--follow-reads) #'ignore))
+            (herdr-core--refresh)
+            (should (= renders 0))
+            (should (buffer-local-value 'herdr-core--agents-dirty buf))
+            (herdr-core--refresh)
+            (herdr-core--refresh)
+            (should (= renders 0))
+            (setq visible t)
+            (herdr-core--window-buffer-changed 'test-window nil)
+            (should (= renders 1))
+            (should-not (buffer-local-value 'herdr-core--agents-dirty buf))
+            (herdr-core--window-buffer-changed 'test-window nil)
+            (should (= renders 1)))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
+(ert-deftest herdr-core-visible-refresh-renders-once-and-computes-agents-once ()
+  (test-herdr-core--fresh
+    (let ((buf (test-herdr-core--agents-buffer))
+          (renders 0)
+          (status-passes 0)
+          (render (symbol-function 'herdr-core--agents-render)))
+      (unwind-protect
+          (cl-letf (((symbol-function 'get-buffer-window)
+                     (lambda (buffer &optional _all-frames) (and (eq buffer buf) t)))
+                    ((symbol-function 'herdr-core-list)
+                     (lambda () (setq status-passes (1+ status-passes)) nil))
+                    ((symbol-function 'herdr-core--agents-props)
+                     (lambda (_agents) nil))
+                    ((symbol-function 'herdr-core--sync-table-state) #'ignore)
+                    ((symbol-function 'herdr-core--vui-root) (lambda () nil))
+                    ((symbol-function 'herdr-core--vui-mount) (lambda (&rest _) nil))
+                    ((symbol-function 'herdr-core--goto-address) #'ignore)
+                    ((symbol-function 'herdr-core--sync-attach-buffer-names) #'ignore)
+                    ((symbol-function 'herdr-core--follow-reads) #'ignore))
+            (cl-letf (((symbol-function 'herdr-core--agents-render)
+                       (lambda () (setq renders (1+ renders)) (funcall render))))
+              (herdr-core--refresh)
+              (should (= renders 1))
+              (should (= status-passes 1))))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
 ;;;; The fake hc
 
 (defun test-herdr-core--fake-hc (dir)
@@ -457,6 +521,7 @@ layer's golden table says; an unlabelled one keeps its address; a clash gets <N>
     (should (test-herdr-core--wait (lambda () (get-buffer "*hc read: tidepool · tidepool-pm*"))))
     ;; Changes arrive pushed: the list redraws.
     (apply #'test-herdr-core--feed (test-herdr-core--lines "changes.jsonl"))
+    (set-window-buffer (selected-window) (get-buffer herdr-core--agents-buffer-name))
     (herdr-core--refresh)
     (with-current-buffer herdr-core--agents-buffer-name
       (should (equal (test-herdr-core--first-agent) "orion/t2"))

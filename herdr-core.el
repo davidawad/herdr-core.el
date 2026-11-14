@@ -2688,6 +2688,9 @@ Returns (ROWS . HEADERS), HEADERS a hash table GROUP -> header text."
 (defvar-local herdr-core--agents-root nil
   "The vui root instance of the list table.")
 
+(defvar-local herdr-core--agents-dirty nil
+  "Non-nil when the agents buffer needs a render before it is next shown.")
+
 (define-derived-mode herdr-core-agents-mode vui-mode "Herdr-Agents"
   "Live list of herdr-core agents on every machine, from `hc events'.
 A `vuistack-table': RET or mouse-1 shows the agent (the row action), `a'
@@ -2759,6 +2762,7 @@ clear filters, `x' fold a group, `H'/`V' columns, `|' pin, ...) work too.
 
 (defun herdr-core--agents-render ()
   "Render the list table from the current agents, keeping point on its agent."
+  (setq herdr-core--agents-dirty nil)
   (let ((address (herdr-core--list-address))
         (column (current-column))
         (agents (herdr-core-list)))
@@ -2771,6 +2775,21 @@ clear filters, `x' fold a group, `H'/`V' columns, `|' pin, ...) work too.
               (herdr-core--vui-mount (apply #'vui-component 'vuistack-table props) (buffer-name)))))
     (set-buffer-modified-p nil)
     (herdr-core--goto-address address column)))
+
+(defun herdr-core--maybe-render-agents (buf)
+  "Render BUF once if it is dirty and currently displayed in a window."
+  (when (and (buffer-live-p buf)
+             (buffer-local-value 'herdr-core--agents-dirty buf)
+             (get-buffer-window buf t))
+    (with-current-buffer buf
+      (when (derived-mode-p 'herdr-core-agents-mode)
+        (herdr-core--agents-render)))))
+
+(defun herdr-core--window-buffer-changed (window _previous-buffer)
+  "Render a dirty herdr agents buffer newly displayed in WINDOW."
+  (herdr-core--maybe-render-agents (window-buffer window)))
+
+(add-hook 'window-buffer-change-functions #'herdr-core--window-buffer-changed)
 
 (defun herdr-core--vui-root ()
   "The vui root instance mounted in this buffer, on any vui.
@@ -2816,7 +2835,9 @@ the window configuration is restored around it."
   (when-let* ((buf (get-buffer herdr-core--agents-buffer-name)))
     (with-current-buffer buf
       (when (derived-mode-p 'herdr-core-agents-mode)
-        (herdr-core--agents-render))))
+        (if (get-buffer-window buf t)
+            (herdr-core--agents-render)
+          (setq herdr-core--agents-dirty t)))))
   (herdr-core--sync-attach-buffer-names)
   (when herdr-core-read-follow (herdr-core--follow-reads))
   (force-mode-line-update t)
