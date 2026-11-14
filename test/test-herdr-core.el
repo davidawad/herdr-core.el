@@ -194,6 +194,10 @@ sort predicate change, and each call returns a list its caller may change."
       (let ((herdr-core-sort-predicate #'herdr-core-sort-by-address))
         (let ((addresses (test-herdr-core--addresses)))
           (should (equal addresses (sort (copy-sequence addresses) #'string<)))))
+      (should (equal (car (test-herdr-core--addresses)) "orion/t2"))
+      ;; The status priority that orders by attention changes.
+      (let ((herdr-core-status-priority '(("done" . 0))))
+        (should (equal (car (test-herdr-core--addresses)) "job-p-a1/t1")))
       (should (equal (car (test-herdr-core--addresses)) "orion/t2")))))
 
 ;;;; The fake hc

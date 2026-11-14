@@ -885,7 +885,7 @@ Call `herdr-core--terminals-changed' after writing it.")
 (defun herdr-core--list-key ()
   "Everything `herdr-core-list' depends on, compared with `eq'."
   (list herdr-core--terminals-generation herdr-core--terminals
-        herdr-core-filter-functions herdr-core-sort-predicate
+        herdr-core-filter-functions herdr-core-sort-predicate herdr-core-status-priority
         herdr-core-show-finished herdr-core-labelled-only herdr-core-hidden-machines
         herdr-core-title-label herdr-core-space-label herdr-core-tab-label))
 
