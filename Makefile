@@ -9,7 +9,9 @@ VUISTACK_URL ?= https://github.com/davidawad/vuistack-table
 VUISTACK_PATH ?= .
 VUI ?= $(DEPS)/vui.el
 VUISTACK_TABLE ?= $(DEPS)/vuistack/$(VUISTACK_PATH)
-LOAD_PATH = -L . -L $(VUI) -L $(VUISTACK_TABLE)
+# Extra -L flags, e.g. Evil's, for the tests that skip without it.
+EXTRA_LOAD_PATH ?=
+LOAD_PATH = -L . -L $(VUI) -L $(VUISTACK_TABLE) $(EXTRA_LOAD_PATH)
 
 .PHONY: test compile deps clean
 

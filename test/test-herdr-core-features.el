@@ -395,6 +395,141 @@
       (goto-char (point-min))
       (should-error (herdr-core-agents-attach) :type 'user-error))))
 
+;;;; The list as a vui board: stripes, summary line, Evil keys
+
+(defun test-herdr-core--striped-lines ()
+  "How many list lines carry the table's stripe face."
+  (with-current-buffer herdr-core--agents-buffer-name
+    (save-excursion
+      (goto-char (point-min))
+      (let ((n 0))
+        (while (not (eobp))
+          (when (text-property-not-all (line-beginning-position) (line-end-position) 'face nil)
+            (let ((pos (line-beginning-position)) found)
+              (while (and (not found) (< pos (line-end-position)))
+                (let ((face (get-text-property pos 'face)))
+                  (when (if (listp face) (memq 'vuistack-table-stripe face)
+                          (eq face 'vuistack-table-stripe))
+                    (setq found t)))
+                (setq pos (1+ pos)))
+              (when found (setq n (1+ n)))))
+          (forward-line 1))
+        n))))
+
+(ert-deftest herdr-core-list-table-zebra-and-props ()
+  "Rows are striped by default; `herdr-core-list-table-props' adds or replaces props, not :id."
+  (should (equal (default-value 'herdr-core-list-table-props) '(:zebra t)))
+  (test-herdr-core--with-fake dir
+    (test-herdr-core--load-snapshot)
+    (herdr-core-agents)
+    (with-current-buffer herdr-core--agents-buffer-name
+      (should (eq (plist-get (herdr-core--table-props (herdr-core-list)) :zebra) t))
+      (should (= (test-herdr-core--striped-lines) 2)))
+    (kill-buffer herdr-core--agents-buffer-name)
+    (let ((herdr-core-list-table-props '(:zebra nil :empty "none" :id hijack :page-size 2)))
+      (let ((props (herdr-core--table-props (herdr-core-list))))
+        (should (eq (plist-get props :id) herdr-core--table-id))
+        (should (equal (plist-get props :empty) "none"))
+        (should (= (plist-get props :page-size) 2)))
+      (herdr-core-agents)
+      (should (= (test-herdr-core--striped-lines) 0))
+      (with-current-buffer herdr-core--agents-buffer-name
+        (should (string-match-p "Page 1 of 3" (buffer-string)))))))
+
+(ert-deftest herdr-core-list-summary-line ()
+  "The list's first line counts agents and each status, in priority order and faces."
+  (test-herdr-core--with-fake dir
+    (test-herdr-core--load-snapshot)
+    (herdr-core-agents)
+    (with-current-buffer herdr-core--agents-buffer-name
+      (goto-char (point-min))
+      (should (equal (test-herdr-core--line)
+                     "5 agents · 1 blocked · 1 done · 1 working · 1 idle · 1 unknown"))
+      (search-forward "blocked")
+      (should (eq (get-text-property (1- (point)) 'face) 'herdr-core-status-blocked))
+      ;; The summary line is no agent; the first agent is still found.
+      (goto-char (point-min))
+      (should-not (herdr-core--list-address))
+      (should (equal (test-herdr-core--first-agent) "quasar/t4"))))
+  (should (equal (substring-no-properties
+                  (herdr-core-list-summary '(((status . "idle")) ((status . "custom"))
+                                             ((status . "blocked")) ((status . "idle")))))
+                 "4 agents · 1 blocked · 2 idle · 1 custom"))
+  (should (equal (herdr-core-list-summary nil) "0 agents"))
+  (should (equal (substring-no-properties (herdr-core-list-summary '(((status . "done")))))
+                 "1 agent · 1 done"))
+  (let ((herdr-core-status-priority '(("idle" . 0) ("blocked" . 1))))
+    (should (equal (substring-no-properties
+                    (herdr-core-list-summary '(((status . "blocked")) ((status . "idle")))))
+                   "2 agents · 1 idle · 1 blocked")))
+  ;; No function, or a custom one, changes the first line.
+  (test-herdr-core--with-fake dir
+    (test-herdr-core--load-snapshot)
+    (let ((herdr-core-list-summary-function nil))
+      (herdr-core-agents)
+      (with-current-buffer herdr-core--agents-buffer-name
+        (goto-char (point-min))
+        (should (string-match-p "Status" (test-herdr-core--line)))))
+    (kill-buffer herdr-core--agents-buffer-name)
+    (let ((herdr-core-list-summary-function (lambda (agents) (format "herd of %d" (length agents)))))
+      (herdr-core-agents)
+      (with-current-buffer herdr-core--agents-buffer-name
+        (goto-char (point-min))
+        (should (equal (test-herdr-core--line) "herd of 5"))))))
+
+(ert-deftest herdr-core-list-evil-keys ()
+  "The list's keys go to Evil's normal and motion states, less the skip keys."
+  (let ((keys (herdr-core--evil-keys)))
+    (dolist (k '(("RET" . herdr-core-agents-show) ("a" . herdr-core-agents-attach)
+                 ("o" . herdr-core-agents-observe) ("r" . herdr-core-agents-read)
+                 ("s" . herdr-core-agents-send) ("b" . herdr-core-agents-next-blocked)
+                 ("m" . herdr-core-agents-mark) ("?" . herdr-core-menu)
+                 ("x" . vuistack-table-toggle-expand) ("f" . vuistack-table-filter-column)))
+      (should (eq (cdr (assoc (car k) keys)) (cdr k))))
+    (should (keymapp (cdr (assoc "/" keys))))
+    (dolist (k '("g" "G" "A" "R" "h" "j" "k" "l"))
+      (should-not (assoc k keys)))
+    (should-not (seq-some (lambda (pair) (string-prefix-p "C-" (car pair))) keys)))
+  ;; `k' kill stays on the mode map (Emacs state) and in the menu.
+  (should (eq (keymap-lookup herdr-core-agents-mode-map "k") #'herdr-core-agents-kill))
+  (should (assoc "K" herdr-core-menu-suffixes))
+  ;; The mode binds them per buffer through `evil-local-set-key'.
+  (let (bound)
+    (cl-letf (((symbol-function 'evil-local-set-key)
+               (lambda (state key def) (push (list state (key-description key) def) bound))))
+      (with-temp-buffer
+        (herdr-core-agents-mode)
+        (should (member '(normal "RET" herdr-core-agents-show) bound))
+        (should (member '(motion "a" herdr-core-agents-attach) bound))
+        (should-not (seq-some (lambda (b) (equal (nth 1 b) "g")) bound)))
+      (setq bound nil)
+      (let ((herdr-core-agents-evil-keys nil))
+        (with-temp-buffer (herdr-core-agents-mode)))
+      (should-not bound))))
+
+(ert-deftest herdr-core-list-evil-keys-with-evil ()
+  "With Evil on, RET and `a' in normal state are the list's commands; g and k stay Evil's."
+  (skip-unless (require 'evil nil t))
+  (let ((was (bound-and-true-p evil-mode)))
+    (unwind-protect
+        (progn
+          (evil-mode 1)
+          (test-herdr-core--with-fake dir
+            (test-herdr-core--load-snapshot)
+            (herdr-core-agents)
+            (with-current-buffer herdr-core--agents-buffer-name
+              (evil-normal-state)
+              (should (eq (key-binding (kbd "RET")) #'herdr-core-agents-show))
+              (should (eq (key-binding (kbd "a")) #'herdr-core-agents-attach))
+              (should (eq (key-binding (kbd "x")) #'vuistack-table-toggle-expand))
+              (should-not (eq (key-binding (kbd "k")) #'herdr-core-agents-kill))
+              (should-not (eq (key-binding (kbd "g")) #'herdr-core-agents-refresh))
+              (evil-motion-state)
+              (should (eq (key-binding (kbd "RET")) #'herdr-core-agents-show))
+              (evil-emacs-state)
+              (should (eq (key-binding (kbd "k")) #'herdr-core-agents-kill)))))
+      (evil-mode (if was 1 -1)))))
+
 (ert-deftest herdr-core-list-table-keeps-state-across-events ()
   "An hc event re-renders the mounted table keeping sort, filter, folds, selection and point."
   (test-herdr-core--with-fake dir

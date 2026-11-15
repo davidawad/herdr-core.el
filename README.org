@@ -55,6 +55,7 @@ or =orion/t3= there.
 | The list is a vuistack-table: customizable columns, multi-sort (attention by default), grouping with attention counts (machine/space/tab/kind/status/label/function) | =S=, =C-u S=, =G=, =x= in the list | =herdr-core-list-columns-sorting-and-grouping=, =herdr-core-list-table-grouping-and-aggregation= |
 | Narrowing as column filters, global and fuzzy filters, marks as the table's selection, several marked side by side | =/ m=, =/ s=, =/ t=, =/ f=, =f=, =/ /=, =m=, =u=, =v= | =herdr-core-list-narrow-mark-and-keys=, =herdr-core-list-table-filters= |
 | Row actions and live updates that keep the table's sort, filters and selection | =RET=, mouse-1, =a=, =o=, =r= | =herdr-core-list-table-row-actions=, =herdr-core-list-table-keeps-state-across-events= |
+| A vui board like the others: striped rows (any extra table props), a status summary line, the list's keys in Evil normal/motion states | =herdr-core-list-table-props=, =herdr-core-list-summary-function=, =herdr-core-agents-evil-keys= | =herdr-core-list-table-zebra-and-props=, =herdr-core-list-summary-line=, =herdr-core-list-evil-keys=, =herdr-core-list-evil-keys-with-evil= (skipped without Evil on the load path; =make test EXTRA_LOAD_PATH="-L path/to/evil -L path/to/goto-chg"=) |
 | Attention-sorted picker, completion groups, pluggable reader | =herdr-core-switch-agent=, =herdr-core-attach-agent=, =herdr-core-observe-agent= | =herdr-core-picker-groups-and-custom-reader=, =herdr-core-switch-attach-observe-read-goto-blocked= |
 | Next/previous/last, jump to blocked, next needing attention | =herdr-core-next-agent=, =herdr-core-previous-agent=, =herdr-core-last-agent=, =herdr-core-goto-blocked=, =herdr-core-next-attention= | =herdr-core-next-previous-attention-and-scope= |
 | Switch by machine, space, tab; attach any terminal | =herdr-core-switch-machine=, =herdr-core-switch-space=, =herdr-core-switch-tab=, =herdr-core-attach-terminal= | =herdr-core-switch-machine-space-tab-and-any-terminal= |
@@ -100,6 +101,15 @@ pin, =+= =-= =\== width, =]= =[= =#= pages, =T=/=B= pin a row, =c= is new agent
 here, =C= =w= cell ranges and copy, =C-c C-r= reset, =C-c C-d= the table's state.
 The keymap is =herdr-core-agents-mode-map= (its parent holds
 =vuistack-table-mode-map=); =herdr-core-agents-mode-hook= runs in the buffer.
+
+A summary line heads the table (=herdr-core-list-summary-function=, by default
+=5 agents · 1 blocked · 3 working=, statuses in =herdr-core-status-priority=
+order), and the rows are striped (=herdr-core-list-table-props=, default
+=(:zebra t)=, any other vuistack-table props too). Under Evil the list's keys win
+in normal and motion states (=herdr-core-agents-evil-keys=), so =RET= shows and
+=a= attaches there; the keys in =herdr-core-agents-evil-skip-keys= (=g= =G= =A=
+=R= and =h= =j= =k= =l=) stay Evil's, so =k= kills in Emacs state, and =?=
+then =K= kills too.
 
 ** Read buffers (=herdr-core-read-agent=)
 
@@ -204,6 +214,10 @@ Every behavior is an option or hook, one customize group per area under
 | =herdr-core-group-order= | ~first~ | Order of groups: =first= by their first agent (attention), =name= by name. |
 | =herdr-core-group-header-function= | ~herdr-core-group-header~ | Function of (GROUP AGENTS) returning the text of a group's row. The table adds the count of agents after it, and the status columns count the agents needing attention. |
 | =herdr-core-list-page-size= | ~nil~ | Agents per page of the list table, or nil for one page. |
+| =herdr-core-list-table-props= | ~(:zebra t)~ | Extra vuistack-table props of the agent list, a plist. Each key here replaces the list's own (:zebra, :page-size, :empty, :sticky-header ...), except :id, :columns, :rows and :row-id, which the list needs and always sets itself. |
+| =herdr-core-list-summary-function= | ~herdr-core-list-summary~ | Function of the listed AGENTS returning the list's summary line, or nil. The line shows above the table; a nil function or result shows none. |
+| =herdr-core-agents-evil-keys= | ~t~ | Non-nil: the list's keys win in Evil's normal and motion states. Evil owns RET and the letters there, so without this RET runs =evil-ret= and =a= does nothing. Keys in =herdr-core-agents-evil-skip-keys= stay Evil's. |
+| =herdr-core-agents-evil-skip-keys= | ~("g" "G" "A" "R" "h" "j" "k" "l")~ | Keys of the list the Evil bindings leave alone (as =kbd= strings). By default the board-motion keys (g top, G bottom, A end of line, R reload) and the hjkl motions. =k= (kill) stays on the mode map, so it still kills in Emacs state (C-z k). |
 
 ** =herdr-core-picker=: Picking and switching agents.
 

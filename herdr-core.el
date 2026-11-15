@@ -78,6 +78,7 @@
 (declare-function ghostel-exec "ghostel" (buffer program &optional args identity))
 (declare-function ghostel-mode "ghostel" ())
 (declare-function term-exec "term" (buffer name command startfile switches))
+(declare-function evil-local-set-key "evil-core" (state key def))
 (declare-function term-mode "term" ())
 (declare-function term-char-mode "term" ())
 (declare-function notifications-notify "notifications" (&rest params))
@@ -358,6 +359,36 @@ count the agents needing attention."
 (defcustom herdr-core-list-page-size nil
   "Agents per page of the list table, or nil for one page."
   :type '(choice (const :tag "One page" nil) natnum)
+  :group 'herdr-core-list)
+
+(defcustom herdr-core-list-table-props '(:zebra t)
+  "Extra `vuistack-table' props of the agent list, a plist.
+Each key here replaces the list's own (:zebra, :page-size, :empty,
+:sticky-header ...), except :id, :columns, :rows and :row-id, which the
+list needs and always sets itself."
+  :type '(plist :tag "vuistack-table props")
+  :group 'herdr-core-list)
+
+(defcustom herdr-core-list-summary-function #'herdr-core-list-summary
+  "Function of the listed AGENTS returning the list's summary line, or nil.
+The line shows above the table; a nil function or result shows none."
+  :type '(choice (const :tag "No summary line" nil) function)
+  :group 'herdr-core-list)
+
+(defcustom herdr-core-agents-evil-keys t
+  "Non-nil: the list's keys win in Evil's normal and motion states.
+Evil owns RET and the letters there, so without this RET runs
+`evil-ret' and `a' does nothing.  Keys in
+`herdr-core-agents-evil-skip-keys' stay Evil's."
+  :type 'boolean
+  :group 'herdr-core-list)
+
+(defcustom herdr-core-agents-evil-skip-keys '("g" "G" "A" "R" "h" "j" "k" "l")
+  "Keys of the list the Evil bindings leave alone (as `kbd' strings).
+By default the board-motion keys (g top, G bottom, A end of line,
+R reload) and the hjkl motions.  `k' (kill) stays on the mode map,
+so it still kills in Emacs state (C-z k)."
+  :type '(repeat string)
   :group 'herdr-core-list)
 
 ;;; Picker
@@ -746,6 +777,7 @@ Bound as soon as it is set and let through Ghostel."
     ("p" "Put a file beside an agent" herdr-core-put-file)
     ("W" "Notify when an agent stops" herdr-core-wait-agent)
     ("e" "Rename agent (session title)" herdr-core-rename-agent)
+    ("K" "Kill agent" herdr-core-kill-agent)
     ("m" herdr-core--menu-mode-description herdr-core-mode))
   "Entries of `herdr-core-menu': (KEY DESCRIPTION COMMAND).
 DESCRIPTION is a string or a function returning one."
@@ -2728,6 +2760,10 @@ prefix, adds to the multi-sort), `G' groups, `m'/`u' mark and `v' shows
 the marked side by side, `/' narrows and filters, `c' starts a new
 agent, `g' reconnects.  The table's own keys (`f' filter a column, `F'
 clear filters, `x' fold a group, `H'/`V' columns, `|' pin, ...) work too.
+A summary line (`herdr-core-list-summary-function') heads the table,
+whose rows are striped (`herdr-core-list-table-props').  Under Evil the
+keys win in normal and motion states, less
+`herdr-core-agents-evil-skip-keys' (`herdr-core-agents-evil-keys').
 \\{herdr-core-agents-mode-map}"
   (setq truncate-lines t)
   (setq-local revert-buffer-function (lambda (&rest _) (herdr-core-agents-refresh)))
@@ -2736,7 +2772,35 @@ clear filters, `x' fold a group, `H'/`V' columns, `|' pin, ...) work too.
             (lambda () (unless (bound-and-true-p herdr-core-mode) (herdr-core-stop)))
             nil t)
   ;; Refreshes while hidden only mark the list dirty; render it when shown.
-  (add-hook 'window-buffer-change-functions #'herdr-core--window-buffer-changed nil t))
+  (add-hook 'window-buffer-change-functions #'herdr-core--window-buffer-changed nil t)
+  (herdr-core--bind-evil-keys))
+
+(defun herdr-core--evil-keys ()
+  "The (KEY . BINDING) pairs of the list the Evil states get, as `kbd' strings.
+Every printable key and RET of `herdr-core-agents-mode-map' (with the
+table's keys under it), the first binding of each, less
+`herdr-core-agents-evil-skip-keys'.  Control and mouse keys are left
+out: Evil does not take them, and a C-c prefix here would hide the
+global one."
+  (let (pairs)
+    (map-keymap
+     (lambda (event binding)
+       (let ((key (cond ((memq event '(13 return)) "RET")
+                        ((and (characterp event) (<= 32 event 126)) (string event)))))
+         (when (and key binding (not (assoc key pairs))
+                    (not (member key herdr-core-agents-evil-skip-keys)))
+           (push (cons key binding) pairs))))
+     herdr-core-agents-mode-map)
+    (nreverse pairs)))
+
+(defun herdr-core--bind-evil-keys ()
+  "Make the list's keys win in this buffer's Evil normal and motion states.
+See `herdr-core-agents-evil-keys'.  Nothing happens without Evil."
+  (when (and herdr-core-agents-evil-keys (fboundp 'evil-local-set-key))
+    (let ((keys (herdr-core--evil-keys)))
+      (dolist (state '(normal motion))
+        (dolist (pair keys)
+          (evil-local-set-key state (kbd (car pair)) (cdr pair)))))))
 
 (defun herdr-core--table-seeded-p ()
   "Non-nil once the list table has state in this buffer."
@@ -2777,6 +2841,48 @@ clear filters, `x' fold a group, `H'/`V' columns, `|' pin, ...) work too.
                            :expanded t)
           :empty (propertize "No agents (c starts one)" 'face 'shadow))))
 
+(defconst herdr-core--own-table-props '(:id :columns :rows :row-id)
+  "Table props `herdr-core-list-table-props' cannot replace.")
+
+(defun herdr-core--table-props (agents)
+  "`herdr-core--agents-props' of AGENTS under `herdr-core-list-table-props'."
+  (let ((props (herdr-core--agents-props agents)))
+    (cl-loop for (key value) on herdr-core-list-table-props by #'cddr
+             unless (memq key herdr-core--own-table-props)
+             do (setq props (plist-put props key value)))
+    props))
+
+(defun herdr-core-list-summary (agents)
+  "The list's summary line for AGENTS: their count, then each status's.
+Statuses come in `herdr-core-status-priority' order (statuses it does
+not name last), each in its face: \"5 agents · 1 blocked · 3 working\"."
+  (let* ((statuses (mapcar (lambda (a) (or (alist-get 'status a) "unknown")) agents))
+         (known (mapcar #'car (seq-sort-by #'cdr #'< (copy-sequence herdr-core-status-priority))))
+         (order (append known (seq-difference (seq-uniq statuses) known))))
+    (string-join
+     (cons (format "%d agent%s" (length agents) (if (= (length agents) 1) "" "s"))
+           (delq nil (mapcar (lambda (status)
+                               (let ((n (seq-count (lambda (s) (equal s status)) statuses)))
+                                 (and (> n 0)
+                                      (propertize (format "%d %s" n status)
+                                                  'face (herdr-core--status-face status)))))
+                             order)))
+     " · ")))
+
+(vui-defcomponent herdr-core--agents-view (summary table)
+  "The agent list: the SUMMARY line (or none) above the `vuistack-table' of TABLE props."
+  :render
+  (vui-fragment
+   (and summary (vui-text summary))
+   (and summary (vui-newline))
+   (apply #'vui-component 'vuistack-table table)))
+
+(defun herdr-core--agents-view-props (agents)
+  "The props of the list view showing AGENTS."
+  (list :summary (and herdr-core-list-summary-function
+                      (funcall herdr-core-list-summary-function agents))
+        :table (herdr-core--table-props agents)))
+
 (defun herdr-core--goto-address (address &optional column)
   "Move to ADDRESS's line (at COLUMN), else the first agent line."
   (goto-char (point-min))
@@ -2798,11 +2904,12 @@ clear filters, `x' fold a group, `H'/`V' columns, `|' pin, ...) work too.
         (agents (herdr-core-list)))
     (herdr-core--sync-table-state)
     (setq herdr-core--agents agents)
-    (let ((props (herdr-core--agents-props agents)))
+    (let ((props (herdr-core--agents-view-props agents)))
       (if (and herdr-core--agents-root (eq herdr-core--agents-root (herdr-core--vui-root)))
           (vui-update herdr-core--agents-root props)
         (setq herdr-core--agents-root
-              (herdr-core--vui-mount (apply #'vui-component 'vuistack-table props) (buffer-name)))))
+              (herdr-core--vui-mount (apply #'vui-component 'herdr-core--agents-view props)
+                                     (buffer-name)))))
     (set-buffer-modified-p nil)
     (herdr-core--goto-address address column)))
 
